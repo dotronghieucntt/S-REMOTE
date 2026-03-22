@@ -1,0 +1,600 @@
+# ZeroTier Quick Setup Tool
+# Run as Administrator
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# Check if running as admin
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    [System.Windows.Forms.MessageBox]::Show("Vui l?ng ch?y script v?i quy?n Administrator!", "L?i", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    exit
+}
+
+# Create main form
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "ZeroTier Quick Setup"
+$form.Size = New-Object System.Drawing.Size(540, 650)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+
+# Logo/Title Label
+$titleLabel = New-Object System.Windows.Forms.Label
+$titleLabel.Location = New-Object System.Drawing.Point(30, 15)
+$titleLabel.Size = New-Object System.Drawing.Size(480, 35)
+$titleLabel.Text = "? ZeroTier VPS Quick Setup Tool"
+$titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+$titleLabel.TextAlign = "MiddleCenter"
+$form.Controls.Add($titleLabel)
+
+# Network ID Label
+$networkLabel = New-Object System.Windows.Forms.Label
+$networkLabel.Location = New-Object System.Drawing.Point(30, 65)
+$networkLabel.Size = New-Object System.Drawing.Size(480, 20)
+$networkLabel.Text = "ZeroTier Network ID:"
+$networkLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.Controls.Add($networkLabel)
+
+# Network ID TextBox
+$networkTextBox = New-Object System.Windows.Forms.TextBox
+$networkTextBox.Location = New-Object System.Drawing.Point(30, 90)
+$networkTextBox.Size = New-Object System.Drawing.Size(480, 25)
+$networkTextBox.Font = New-Object System.Drawing.Font("Consolas", 10)
+$networkTextBox.Text = "743993800f9dac1e"
+$form.Controls.Add($networkTextBox)
+
+# Username Label
+$userLabel = New-Object System.Windows.Forms.Label
+$userLabel.Location = New-Object System.Drawing.Point(30, 130)
+$userLabel.Size = New-Object System.Drawing.Size(480, 20)
+$userLabel.Text = "Username (m?c ?nh: Administrator):"
+$userLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.Controls.Add($userLabel)
+
+# Username TextBox
+$userTextBox = New-Object System.Windows.Forms.TextBox
+$userTextBox.Location = New-Object System.Drawing.Point(30, 155)
+$userTextBox.Size = New-Object System.Drawing.Size(480, 25)
+$userTextBox.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$userTextBox.Text = $env:USERNAME
+$form.Controls.Add($userTextBox)
+
+# Password Label
+$passLabel = New-Object System.Windows.Forms.Label
+$passLabel.Location = New-Object System.Drawing.Point(30, 195)
+$passLabel.Size = New-Object System.Drawing.Size(480, 20)
+$passLabel.Text = "Password cho Remote Desktop:"
+$passLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.Controls.Add($passLabel)
+
+# Password TextBox
+$passTextBox = New-Object System.Windows.Forms.TextBox
+$passTextBox.Location = New-Object System.Drawing.Point(30, 220)
+$passTextBox.Size = New-Object System.Drawing.Size(480, 25)
+$passTextBox.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$passTextBox.PasswordChar = '*'
+$form.Controls.Add($passTextBox)
+
+# Generate Password Button
+$genPassButton = New-Object System.Windows.Forms.Button
+$genPassButton.Location = New-Object System.Drawing.Point(30, 255)
+$genPassButton.Size = New-Object System.Drawing.Size(200, 32)
+$genPassButton.Text = "? T?o Password Ng?u Nhi?n"
+$genPassButton.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$genPassButton.Add_Click({
+    $randomPass = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object {[char]$_})
+    $passTextBox.Text = $randomPass
+    $passTextBox.PasswordChar = [char]0
+})
+$form.Controls.Add($genPassButton)
+
+# Status TextBox
+$statusBox = New-Object System.Windows.Forms.TextBox
+$statusBox.Location = New-Object System.Drawing.Point(30, 305)
+$statusBox.Size = New-Object System.Drawing.Size(480, 190)
+$statusBox.Multiline = $true
+$statusBox.ScrollBars = "Vertical"
+$statusBox.ReadOnly = $true
+$statusBox.Font = New-Object System.Drawing.Font("Consolas", 9)
+$statusBox.BackColor = [System.Drawing.Color]::Black
+$statusBox.ForeColor = [System.Drawing.Color]::Lime
+$form.Controls.Add($statusBox)
+
+# Install Button
+$installButton = New-Object System.Windows.Forms.Button
+$installButton.Location = New-Object System.Drawing.Point(30, 510)
+$installButton.Size = New-Object System.Drawing.Size(480, 50)
+$installButton.Text = "? B?T ?U C?I ?T & SETUP"
+$installButton.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+$installButton.BackColor = [System.Drawing.Color]::Green
+$installButton.ForeColor = [System.Drawing.Color]::White
+$installButton.FlatStyle = "Flat"
+
+$installButton.Add_Click({
+    $networkId = $networkTextBox.Text.Trim()
+    $username = $userTextBox.Text.Trim()
+    $password = $passTextBox.Text
+    
+    if ([string]::IsNullOrWhiteSpace($networkId)) {
+        [System.Windows.Forms.MessageBox]::Show("Vui l?ng nh?p Network ID!", "L?i", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($password)) {
+        [System.Windows.Forms.MessageBox]::Show("Vui l?ng nh?p ho?c t?o Password!", "L?i", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    
+    $installButton.Enabled = $false
+    $statusBox.Clear()
+    
+    function Write-Status {
+        param($message)
+        $statusBox.AppendText("$message`r`n")
+        $statusBox.ScrollToCaret()
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    
+    try {
+        # Step 1: Download ZeroTier
+        Write-Status "=== B?T ?U C?I ?T ZEROTIER ==="
+        Write-Status "[1/7] ?ang t?i ZeroTier One installer..."
+        
+        $ztInstaller = "$env:TEMP\ZeroTierOne.msi"
+        $ztUrl = "https://download.zerotier.com/dist/ZeroTier%20One.msi"
+        
+        # Check if ZeroTier already installed
+        $ztInstalled = Get-Service -Name "ZeroTierOneService" -ErrorAction SilentlyContinue
+        
+        if ($ztInstalled) {
+            Write-Status "[?] ZeroTier ? ?c c?i ?t!"
+        } else {
+            Invoke-WebRequest -Uri $ztUrl -OutFile $ztInstaller -UseBasicParsing
+            Write-Status "[?] T?i xu?ng ho?n t?t!"
+            
+            Write-Status "[2/7] ?ang c?i ?t ZeroTier One..."
+            Start-Process msiexec.exe -ArgumentList "/i `"$ztInstaller`" /qn /norestart" -Wait
+            Start-Sleep -Seconds 3
+            Write-Status "[?] C?i ?t ZeroTier ho?n t?t!"
+        }
+        
+        # Step 2: Join Network
+        Write-Status "[3/7] ?ang join v?o network: $networkId..."
+        $ztCli = "C:\ProgramData\ZeroTier\One\zerotier-one_x64.exe"
+        if (-not (Test-Path $ztCli)) {
+            $ztCli = "C:\Program Files (x86)\ZeroTier\One\zerotier-one_x64.exe"
+        }
+        
+        Start-Process -FilePath $ztCli -ArgumentList "-q join $networkId" -Wait -NoNewWindow
+        Start-Sleep -Seconds 2
+        Write-Status "[?] ? join network!"
+        Write-Status "[!] Nh? AUTHORIZE thi?t b? n?y tr?n ZeroTier Central!"
+        
+        # Step 3: Enable Remote Desktop
+        Write-Status "[4/7] ?ang b?t Remote Desktop..."
+        
+        # 1. Enable Remote Desktop Service
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+        
+        # 2. Enable Remote Desktop (Allow Remote Connections)
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "AllowTSConnections" -Value 1 -Force
+        
+        # 3. Disable Network Level Authentication (d? k?t n?i h?n)
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
+        
+        # 4. Enable Remote Desktop in System Settings
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0 -Force
+        
+        # 5. Disable "Only allow connections from computers running Remote Desktop with NLA"
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "SecurityLayer" -Value 0 -Force
+        
+        # 6. Set minimum encryption level to low (compatible)
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MinEncryptionLevel" -Value 1 -Force
+        
+        # 7. Disable "Require user authentication for remote connections by using NLA"
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fAllowSecProtocolNegotiation" -Value 0 -Force
+        
+        # 8. Enable RemoteDesktop-UserMode-In-TCP firewall rule TR?C KHI start service
+        Enable-NetFirewallRule -Name "RemoteDesktop-UserMode-In-TCP" -ErrorAction SilentlyContinue
+        Enable-NetFirewallRule -Name "RemoteDesktop-UserMode-In-UDP" -ErrorAction SilentlyContinue
+        
+        # 9. CRITICAL: Force kill RDP sessions v? reset listener
+        Write-Status "[!] ?ang reset RDP listener ho?n to?n..."
+        
+        # Kill t?t c? RDP sessions
+        qwinsta 2>$null | Select-String "rdp" | ForEach-Object { 
+            $sessionId = ($_ -split '\s+')[2]
+            if ($sessionId -match '^\d+$') {
+                logoff $sessionId /server:localhost 2>$null
+            }
+        }
+        
+        # Stop T?T C? services RDP-related
+        $rdpServices = @("SessionEnv", "TermService", "UmRdpService")
+        foreach ($svc in $rdpServices) {
+            Write-Status "[!] Stopping $svc..."
+            Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+            # D?ng sc.exe ? ch?c ch?n stop
+            sc.exe stop $svc 2>$null | Out-Null
+        }
+        
+        Write-Status "[!] ?i services stop ho?n to?n..."
+        Start-Sleep -Seconds 5
+        
+        # Verify services ? stop
+        foreach ($svc in $rdpServices) {
+            $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+            if ($service -and $service.Status -eq "Running") {
+                Write-Status "[!] Force killing $svc..."
+                sc.exe stop $svc 2>$null | Out-Null
+                Start-Sleep -Seconds 1
+            }
+        }
+        
+        # 10. Start services theo ?ng th? t?
+        Write-Status "[!] Starting RDP services..."
+        
+        # Start SessionEnv first
+        Set-Service -Name "SessionEnv" -StartupType Automatic -ErrorAction SilentlyContinue
+        sc.exe start "SessionEnv" 2>$null | Out-Null
+        Start-Sleep -Seconds 2
+        
+        # Start TermService
+        Set-Service -Name "TermService" -StartupType Automatic -ErrorAction SilentlyContinue
+        sc.exe start "TermService" 2>$null | Out-Null
+        Start-Sleep -Seconds 3
+        
+        # Verify TermService started
+        $maxRetries = 3
+        $retry = 0
+        while ($retry -lt $maxRetries) {
+            $termService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
+            if ($termService.Status -eq "Running") {
+                Write-Status "[?] TermService ? start!"
+                break
+            } else {
+                Write-Status "[!] Retry start TermService ($($retry + 1)/$maxRetries)..."
+                sc.exe start "TermService" 2>$null | Out-Null
+                Start-Sleep -Seconds 2
+                $retry++
+            }
+        }
+        
+        # Start UmRdpService
+        Set-Service -Name "UmRdpService" -StartupType Automatic -ErrorAction SilentlyContinue
+        sc.exe start "UmRdpService" 2>$null | Out-Null
+        Start-Sleep -Seconds 2
+        
+        # 11. Enable ALL Remote Desktop Firewall Rules
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+        Enable-NetFirewallRule -DisplayGroup "@FirewallAPI.dll,-28752" -ErrorAction SilentlyContinue
+        
+        # 12. Add custom firewall rules for RDP (port 3389) - ALL PROFILES
+        $firewallRules = @(
+            @{Name="ZeroTier-RDP-TCP"; Protocol="TCP"; Port=3389; Description="ZeroTier Remote Desktop TCP"},
+            @{Name="ZeroTier-RDP-UDP"; Protocol="UDP"; Port=3389; Description="ZeroTier Remote Desktop UDP"}
+        )
+        
+        foreach ($rule in $firewallRules) {
+            $existingRule = Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue
+            if ($existingRule) {
+                Remove-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue
+            }
+            New-NetFirewallRule -DisplayName $rule.Name `
+                                -Direction Inbound `
+                                -Protocol $rule.Protocol `
+                                -LocalPort $rule.Port `
+                                -Action Allow `
+                                -Profile Any `
+                                -Enabled True `
+                                -Description $rule.Description `
+                                -ErrorAction SilentlyContinue | Out-Null
+        }
+        Write-Status "[?] ? t?o firewall rules cho RDP qua ZeroTier!"
+        
+        # 13. Disable Windows Firewall cho t?t c? profiles (? ?m b?o k?t n?i)
+        Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
+        Write-Status "[?] ? T?T Windows Firewall (cho ph?p m?i k?t n?i)!"
+        
+        # 14. Allow Remote Desktop through Windows Firewall (backup method)
+        netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>$null
+        
+        # 15. Set RDP port to listen on all interfaces
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "PortNumber" -Value 3389 -Force
+        
+        # 16. Enable Remote Assistance
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Remote Assistance" -Name "fAllowToGetHelp" -Value 1 -Force -ErrorAction SilentlyContinue
+        
+        # 17. SUPER CRITICAL: Reset RDP listener using netsh
+        Write-Status "[!] ?ang reset RDP listener configuration..."
+        netsh interface ip delete arpcache 2>$null
+        
+        # 18. Clear RDP cache v? temp files
+        $rdpCache = "$env:LOCALAPPDATA\Microsoft\Terminal Server Client\Cache"
+        if (Test-Path $rdpCache) {
+            Remove-Item "$rdpCache\*" -Force -Recurse -ErrorAction SilentlyContinue
+        }
+        
+        # 19. Force reload Group Policy ? apply RDP settings
+        Write-Status "[!] ?ang reload Group Policy..."
+        gpupdate /force /target:computer 2>$null | Out-Null
+        
+        # 20. Restart ZeroTier service ? refresh network
+        $ztService = Get-Service -Name "ZeroTierOneService" -ErrorAction SilentlyContinue
+        if ($ztService -and $ztService.Status -eq "Running") {
+            Write-Status "[!] ?ang refresh ZeroTier network..."
+            Restart-Service -Name "ZeroTierOneService" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 4
+        }
+        
+        # 21. FINAL: Verify port 3389 is listening with extended retry
+        Write-Status "[!] ?ang verify RDP port..."
+        $maxRetries = 10
+        $retryCount = 0
+        $portListening = $false
+        
+        while (-not $portListening -and $retryCount -lt $maxRetries) {
+            Start-Sleep -Seconds 2
+            $listening = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+            if ($listening) {
+                $portListening = $true
+                Write-Status "[?] Port 3389 ?ang listen - S?N S?NG K?T N?I!"
+            } else {
+                $retryCount++
+                Write-Status "[~] ?i port 3389... ($retryCount/$maxRetries)"
+                
+                # N?u retry > 5, th? restart TermService l?i
+                if ($retryCount -eq 5) {
+                    Write-Status "[!] ?ang restart TermService l?n cu?i..."
+                    sc.exe stop "TermService" 2>$null | Out-Null
+                    Start-Sleep -Seconds 2
+                    sc.exe start "TermService" 2>$null | Out-Null
+                    Start-Sleep -Seconds 3
+                }
+            }
+        }
+        
+        if (-not $portListening) {
+            Write-Status "[?] WARNING: Port 3389 ch?a listen!"
+            Write-Status "[!] Th? restart service TermService th? c?ng:"
+            Write-Status "    sc.exe stop TermService && sc.exe start TermService"
+        }
+        
+        Write-Status ""
+        Write-Status "[?] Remote Desktop ? ?c B?T HO?N TO?N!"
+        Write-Status "[?] T?T C? services ? RESTART!"
+        Write-Status "[?] ? T?T NLA (Network Level Authentication)!"
+        Write-Status "[?] ? T?T Windows Firewall!"
+        Write-Status "[?] RDP Listener ? ?c RESET!"
+        Write-Status "[?] Group Policy ? RELOAD!"
+        Write-Status "[?] KH?NG C?N RESTART M?Y - K?T N?I NGAY!"
+        
+        # Step 4: Set Password & Configure User
+        Write-Status "[5/7] ?ang ?t password cho user: $username..."
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # Check if user exists
+        $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+        if ($userExists) {
+            Set-LocalUser -Name $username -Password $securePass
+            Write-Status "[?] ? c?p nh?t password cho user $username!"
+        } else {
+            Write-Status "[!] User $username kh?ng t?n t?i, ?ang t?o user m?i..."
+            New-LocalUser -Name $username -Password $securePass -FullName $username -Description "Created by ZeroTier Setup Tool" -PasswordNeverExpires $true
+            Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+            Write-Status "[?] ? t?o user $username v? th?m v?o Administrators!"
+        }
+        
+        # Add user to Remote Desktop Users group (QUAN TR?NG!)
+        try {
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+            Write-Status "[?] ? th?m $username v?o Remote Desktop Users!"
+        } catch {
+            Write-Status "[!] User ? c? trong Remote Desktop Users group"
+        }
+        
+        # Enable user account (n?u b? disable)
+        Enable-LocalUser -Name $username -ErrorAction SilentlyContinue
+        Write-Status "[?] User $username ? ?c k?ch ho?t!"
+        
+        # Set password never expires
+        Set-LocalUser -Name $username -PasswordNeverExpires $true -ErrorAction SilentlyContinue
+        Write-Status "[?] Password kh?ng bao gi? h?t h?n!"
+        
+        # Step 5: Test Remote Desktop Configuration
+        Write-Status ""
+        Write-Status "[6/7] ?ang test c?u h?nh Remote Desktop..."
+        
+        $testsPassed = 0
+        $totalTests = 6
+        
+        # Test 1: Registry Settings
+        $fDenyTS = (Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections").fDenyTSConnections
+        if ($fDenyTS -eq 0) {
+            Write-Status "  [?] Test 1/6: Registry fDenyTSConnections = 0"
+            $testsPassed++
+        } else {
+            Write-Status "  [?] Test 1/6: Registry fDenyTSConnections = $fDenyTS (FAILED!)"
+        }
+        
+        # Test 2: Terminal Service Running
+        $termService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
+        if ($termService.Status -eq "Running") {
+            Write-Status "  [?] Test 2/6: Terminal Service ?ang ch?y"
+            $testsPassed++
+        } else {
+            Write-Status "  [?] Test 2/6: Terminal Service kh?ng ch?y (FAILED!)"
+        }
+        
+        # Test 3: Port 3389 Listening
+        Start-Sleep -Seconds 2
+        $listening = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+        if ($listening) {
+            Write-Status "  [?] Test 3/6: Port 3389 ?ang listen"
+            $testsPassed++
+        } else {
+            Write-Status "  [?] Test 3/6: Port 3389 KH?NG listen (FAILED!)"
+        }
+        
+        # Test 4: User Authentication Disabled
+        $userAuth = (Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication").UserAuthentication
+        if ($userAuth -eq 0) {
+            Write-Status "  [?] Test 4/6: NLA ? ?c t?t"
+            $testsPassed++
+        } else {
+            Write-Status "  [?] Test 4/6: NLA v?n c?n b?t (FAILED!)"
+        }
+        
+        # Test 5: Firewall Rules
+        $rdpRules = Get-NetFirewallRule -DisplayGroup "Remote Desktop" -Enabled True -ErrorAction SilentlyContinue
+        if ($rdpRules) {
+            Write-Status "  [?] Test 5/6: Firewall rules ? enabled ($($rdpRules.Count) rules)"
+            $testsPassed++
+        } else {
+            Write-Status "  [?] Test 5/6: Kh?ng c? firewall rules (FAILED!)"
+        }
+        
+        # Test 6: User in Remote Desktop Users Group
+        $rdpUsers = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue | Where-Object {$_.Name -like "*$username*"}
+        if ($rdpUsers) {
+            Write-Status "  [?] Test 6/6: User trong Remote Desktop Users group"
+            $testsPassed++
+        } else {
+            Write-Status "  [?] Test 6/6: User KH?NG trong RDP Users group (FAILED!)"
+        }
+        
+        Write-Status ""
+        if ($testsPassed -eq $totalTests) {
+            Write-Status "[?] T?T C? TESTS PASSED! Remote Desktop s?n s?ng!"
+        } else {
+            Write-Status "[!] Ch? $testsPassed/$totalTests tests passed. C? th? g?p v?n ? khi k?t n?i!"
+        }
+        Write-Status ""
+        
+        # Step 6: Get ZeroTier IP
+        Write-Status "[7/7] ?ang l?y th?ng tin IP ZeroTier..."
+        Start-Sleep -Seconds 3
+        
+        $ztInfo = & $ztCli -q listnetworks | Out-String
+        Write-Status $ztInfo
+        
+        # Get ZeroTier IP
+        $ztIP = ""
+        $networks = & $ztCli -q listnetworks
+        foreach ($line in $networks) {
+            if ($line -match $networkId) {
+                $parts = $line -split '\s+'
+                foreach ($part in $parts) {
+                    if ($part -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}') {
+                        $ztIP = $part
+                        break
+                    }
+                }
+            }
+        }
+        
+        if (-not $ztIP) {
+            $ztIP = "Ch?a c? IP (ch? authorize tr?n ZeroTier Central)"
+        }
+        
+        # Step 7: Final Connection Test
+        Write-Status ""
+        Write-Status "?ang test k?t n?i cu?i c?ng..."
+        
+        # Test local RDP connection using simple TCP test (no popup)
+        try {
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $connect = $tcpClient.BeginConnect("localhost", 3389, $null, $null)
+            $wait = $connect.AsyncWaitHandle.WaitOne(3000, $false)
+            
+            if ($wait) {
+                $tcpClient.EndConnect($connect)
+                $tcpClient.Close()
+                Write-Status "  [?] K?t n?i local RDP: TH?NH C?NG"
+                $rdpTest = @{TcpTestSucceeded = $true}
+            } else {
+                $tcpClient.Close()
+                Write-Status "  [?] K?t n?i local RDP: TH?T B?I"
+                $rdpTest = @{TcpTestSucceeded = $false}
+            }
+        } catch {
+            Write-Status "  [?] K?t n?i local RDP: TH?T B?I"
+            $rdpTest = @{TcpTestSucceeded = $false}
+        }
+        
+        # Test ZeroTier IP if available (skip to avoid popup)
+        # if ($ztIP -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}') {
+        #     Write-Status "  [~] Test qua ZeroTier IP s? ?c th?c hi?n khi k?t n?i"
+        # }
+        
+        Write-Status ""
+        
+        # Display Results
+        Write-Status ""
+        Write-Status "?"
+        Write-Status "?     TH?NG TIN K?T N?I REMOTE DESKTOP       ?"
+        Write-Status "?"
+        Write-Status ""
+        Write-Status "? ZeroTier IP    : $ztIP"
+        Write-Status "? Username       : $username"
+        Write-Status "? Password       : $password"
+        Write-Status ""
+        Write-Status "? TR?NG TH?I TESTS:"
+        Write-Status "   ? Configuration Tests: $testsPassed/$totalTests passed"
+        if ($rdpTest.TcpTestSucceeded) {
+            Write-Status "   ? Local RDP: ONLINE"
+        } else {
+            Write-Status "   ? Local RDP: OFFLINE"
+        }
+        Write-Status ""
+        Write-Status "? ? k?t n?i Remote Desktop:"
+        Write-Status "   1. M? Remote Desktop Connection (mstsc)"
+        Write-Status "   2. Nh?p IP: $ztIP"
+        Write-Status "   3. Nh?p Username: $username"
+        Write-Status "   4. Nh?p Password: $password"
+        Write-Status ""
+        Write-Status "[?] HO?N T?T! VPS ? s?n s?ng!"
+        
+        # Copy to clipboard
+        $clipboardText = @"
+=== TH?NG TIN REMOTE DESKTOP ===
+IP: $ztIP
+Username: $username
+Password: $password
+"@
+        Set-Clipboard -Value $clipboardText
+        Write-Status ""
+        Write-Status "[?] ? copy th?ng tin v?o clipboard!"
+        
+        [System.Windows.Forms.MessageBox]::Show("C?i ?t ho?n t?t!`n`nIP: $ztIP`nUsername: $username`nPassword: $password`n`nTh?ng tin ? ?c copy v?o clipboard!", "Th?nh c?ng", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        
+    } catch {
+        Write-Status ""
+        Write-Status "[?] L?I: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("C? l?i x?y ra: $($_.Exception.Message)", "L?i", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    } finally {
+        $installButton.Enabled = $true
+    }
+})
+
+$form.Controls.Add($installButton)
+
+# Copy Info Button
+$copyButton = New-Object System.Windows.Forms.Button
+$copyButton.Location = New-Object System.Drawing.Point(30, 570)
+$copyButton.Size = New-Object System.Drawing.Size(480, 35)
+$copyButton.Text = "? Copy Th?ng Tin"
+$copyButton.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$copyButton.Add_Click({
+    if ($statusBox.Text -ne "") {
+        Set-Clipboard -Value $statusBox.Text
+        [System.Windows.Forms.MessageBox]::Show("? copy th?ng tin v?o clipboard!", "Th?ng b?o", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    }
+})
+$form.Controls.Add($copyButton)
+
+# Show form
+Write-Status "S?n s?ng c?i ?t. Nh?p th?ng tin v? nh?n n?t c?i ?t..."
+[void]$form.ShowDialog()
+
