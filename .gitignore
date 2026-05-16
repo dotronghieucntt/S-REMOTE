@@ -1,0 +1,25 @@
+# ── Build artifacts ───────────────────────────────────────────────────────────
+build_tmp/
+dist/
+build/
+*.spec.bak
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ── Temp / debug ──────────────────────────────────────────────────────────────
+temp-*.ps1
+temp-*.txt
+*.tmp
+
+# ── User-specific ─────────────────────────────────────────────────────────────
+servers.json
+.venv/
+
+# ── Releases are tracked (intentionally NOT ignored) ─────────────────────────
+# releases/   ← keep in git so GitHub has download assets
+
+# ── Old spec (replaced by NOVIVO-RemoteDesktop.spec) ─────────────────────────
+NOVIVO-App.spec
