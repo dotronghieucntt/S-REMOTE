@@ -14,7 +14,7 @@ import string
 import tkinter as tk
 
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
 
 # ─── Re-launch as admin if needed ───────────────────────────────────────────
@@ -116,9 +116,9 @@ class ServerList(tk.Frame):
         wrap = tk.Frame(self, bg=C["panel"])
         wrap.pack(fill="x")
         self._canvas = tk.Canvas(wrap, bg=C["panel"], highlightthickness=0, height=110)
-        self._sbar   = tk.Scrollbar(wrap, orient="vertical",
+        self._sbar   = ttk.Scrollbar(wrap, orient="vertical",
                                     command=self._canvas.yview,
-                                    bg=C["panel"], troughcolor=C["log_bg"], width=8)
+                                    style="Dark.Vertical.TScrollbar")
         self._canvas.configure(yscrollcommand=self._sbar.set)
         self._sbar.pack(side="right", fill="y")
         self._canvas.pack(side="left", fill="both", expand=True)
@@ -444,6 +444,7 @@ class UserTable(tk.Frame):
 class NovivoCTkApp(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=C["bg"])
+        self._setup_scrollbar_style()
         self.title("NOVIVO Remote Desktop")
         self.geometry("1080x700")
         self.minsize(900, 620)
@@ -462,6 +463,23 @@ class NovivoCTkApp(ctk.CTk):
         self._build_statusbar()
         # Auto-save servers on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ── Scrollbar style ──────────────────────────────────────────────────────
+    def _setup_scrollbar_style(self):
+        s = ttk.Style(self)
+        s.theme_use("clam")
+        s.configure("Dark.Vertical.TScrollbar",
+                    background=C["input_bg"],      # thumb
+                    troughcolor=C["bg"],            # track
+                    bordercolor=C["bg"],
+                    arrowcolor=C["btn_dim"],
+                    darkcolor=C["input_bg"],
+                    lightcolor=C["input_bg"],
+                    relief="flat",
+                    arrowsize=10,
+                    width=8)
+        s.map("Dark.Vertical.TScrollbar",
+              background=[("active", C["accent"]), ("pressed", C["accent_hov"])])
 
     # ── Header ───────────────────────────────────────────────────────────────
     def _build_header(self):
@@ -559,9 +577,21 @@ class NovivoCTkApp(ctk.CTk):
             bg=C["panel"], fg=C["text_lo"], font=("Segoe UI", 8), anchor="w", padx=18)
         self._vpn_hint.pack(fill="x", pady=(2, 0))
 
+        # RDP port row
+        port_row = tk.Frame(left, bg=C["panel"])
+        port_row.pack(fill="x", padx=14, pady=(4, 0))
+        tk.Label(port_row, text="RDP PORT:", bg=C["panel"], fg=C["text_lo"],
+                 font=FONT_LABELB).pack(side="left")
+        self._rdp_port = tk.Entry(port_row, bg=C["input_bg"], fg=C["text_hi"],
+                                  insertbackground=C["text_hi"], relief="flat",
+                                  font=FONT_INPUT, width=6, justify="center")
+        self._rdp_port.insert(0, "3389")
+        self._rdp_port.pack(side="left", ipady=3, padx=(6, 0))
+        tk.Label(port_row, text="(default 3389 — change if blocked)",
+                 bg=C["panel"], fg=C["text_lo"], font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
+
         tk.Frame(left, bg=C["border"], height=1).pack(fill="x", pady=8)
 
-        # ── USERS & CREDENTIALS ───────────────────────────────────────────────
         self._section_header(left, "USERS & CREDENTIALS  (RDP)", C["success"])
 
         self._table = UserTable(left)
@@ -633,9 +663,8 @@ class NovivoCTkApp(ctk.CTk):
                             font=FONT_LOG, relief="flat", wrap="word",
                             state="disabled", padx=10, pady=6,
                             insertbackground=C["log_fg"])
-        scroll = tk.Scrollbar(log_frame, command=self._log.yview,
-                              bg=C["panel"], troughcolor=C["log_bg"],
-                              width=10)
+        scroll = ttk.Scrollbar(log_frame, command=self._log.yview,
+                              style="Dark.Vertical.TScrollbar")
         self._log.config(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self._log.pack(side="left", fill="both", expand=True)
@@ -859,6 +888,11 @@ class NovivoCTkApp(ctk.CTk):
                     f"Password for '{u['Username']}' cannot be empty.")
                 return
 
+        rdp_port = self._rdp_port.get().strip()
+        if not rdp_port.isdigit() or not (1 <= int(rdp_port) <= 65535):
+            messagebox.showerror("Validation", "RDP port must be a number between 1 and 65535.")
+            return
+
         self._install_running = True
         self._btn_start.configure(state="disabled", text="⏳  RUNNING…")
         self._progress.pack(side="left", padx=14, pady=18)
@@ -876,7 +910,8 @@ class NovivoCTkApp(ctk.CTk):
                 "-File", BACKEND,
                 "-Method", method,
                 "-NetworkKey", net_key,
-                "-UsersJson", users_json
+                "-UsersJson", users_json,
+                "-RdpPort", rdp_port
             ]
             try:
                 proc = subprocess.Popen(

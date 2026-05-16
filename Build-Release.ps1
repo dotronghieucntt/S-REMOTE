@@ -17,20 +17,61 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PYTHON = "C:/Users/HIEU/AppData/Roaming/uv/python/cpython-3.13.12-windows-x86_64-none/python.exe"
-$PYI    = "C:/Users/HIEU/AppData/Roaming/uv/python/cpython-3.13.12-windows-x86_64-none/Scripts/pyinstaller.exe"
-$ROOT   = $PSScriptRoot
+$ROOT = $PSScriptRoot
 
 function Write-Step([string]$msg) {
     Write-Host ""
     Write-Host ">> $msg" -ForegroundColor Cyan
 }
 
-# --- 0. Verify tools ---------------------------------------------------------
+# --- 0. Auto-detect Python + PyInstaller ------------------------------------
 Write-Step "0/7  Verifying build tools"
-foreach ($t in @($PYTHON, $PYI)) {
-    if (-not (Test-Path $t)) { throw "Not found: $t" }
+
+# Build candidate list of python.exe paths to check
+$pyCandidates = [System.Collections.Generic.List[string]]::new()
+
+# 1. uv-managed installs (current user) — preferred, usually have all packages
+$uvBase = Join-Path $env:APPDATA "uv\python"
+if (Test-Path $uvBase) {
+    Get-ChildItem $uvBase -Filter "python.exe" -Recurse -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | ForEach-Object { $pyCandidates.Add($_.FullName) }
 }
+
+# 2. python / python3 / py on PATH
+foreach ($cmd in @("python","python3","py")) {
+    $p = Get-Command $cmd -ErrorAction SilentlyContinue
+    if ($p -and ($p.Source -match "Python 3|python3" -or (& $p.Source --version 2>&1) -match "Python 3")) {
+        if (-not $pyCandidates.Contains($p.Source)) { $pyCandidates.Add($p.Source) }
+    }
+}
+
+# Pick the first candidate that has pyinstaller.exe in its Scripts/ or AppData Scripts/
+$PYTHON = $null ; $PYI = $null
+foreach ($py in $pyCandidates) {
+    $pyDir2   = Split-Path $py
+    $pyi_sys  = Join-Path $pyDir2 "Scripts\pyinstaller.exe"
+    # Also check per-user Scripts folder that pip --user installs to
+    $ver3     = & $py --version 2>&1
+    $pyVer    = if ($ver3 -match "Python (\d+\.\d+)") { $Matches[1] } else { "" }
+    $pyi_user = "$env:APPDATA\Python\Python$($pyVer -replace '\.','')Scripts\pyinstaller.exe"
+    if (Test-Path $pyi_sys)  { $PYTHON = $py ; $PYI = $pyi_sys  ; break }
+    if (Test-Path $pyi_user) { $PYTHON = $py ; $PYI = $pyi_user ; break }
+}
+
+# Fallback: pick any Python 3, install PyInstaller into it
+if (-not $PYTHON) {
+    if ($pyCandidates.Count -gt 0) {
+        $PYTHON = $pyCandidates[0]
+        $pyDir2 = Split-Path $PYTHON
+        Write-Host "PyInstaller not found, installing into $PYTHON ..." -ForegroundColor Yellow
+        & $PYTHON -m pip install pyinstaller --quiet
+        $PYI = Join-Path $pyDir2 "Scripts\pyinstaller.exe"
+        if (-not (Test-Path $PYI)) { throw "PyInstaller install failed. Run: pip install pyinstaller" }
+    } else {
+        throw "Python 3 not found. Install Python or uv, then: pip install pyinstaller"
+    }
+}
+
 Write-Host "[OK] Python: $PYTHON"
 Write-Host "[OK] PyInstaller: $PYI"
 
@@ -68,9 +109,18 @@ if ($LASTEXITCODE -ne 0) { throw "version_info.py failed" }
 
 # --- 4. Clean previous build artifacts ---------------------------------------
 Write-Step "4/7  Cleaning previous build artifacts"
+# Kill any running NOVIVO EXE that may be locking dist/ files
+Get-Process | Where-Object { $_.Name -like "*NOVIVO*" } |
+    ForEach-Object { Write-Host "  Stopping: $($_.Name)"; Stop-Process $_ -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 1
+
 foreach ($d in @("build_tmp", "dist")) {
     $p = Join-Path $ROOT $d
-    if (Test-Path $p) { Remove-Item $p -Recurse -Force; Write-Host "  Cleaned: $d" }
+    if (Test-Path $p) {
+        Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $p) { Write-Host "  [WARN] Could not fully clean: $d (file may be locked)" }
+        else              { Write-Host "  Cleaned: $d" }
+    }
 }
 
 # --- 5. Run PyInstaller with spec --------------------------------------------
@@ -106,12 +156,20 @@ if (Test-Path $onefile) {
     Write-Warning "Onefile EXE not found at: $onefile"
 }
 
-# Copy onedir folder
+# Copy onedir folder + zip it
 if (Test-Path $onedirBase) {
     $dst = Join-Path $relDir "$appName (Full)"
     if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
     Copy-Item $onedirBase $dst -Recurse -Force
     Write-Host "[OK] Full → releases\v$verCurrent\$appName (Full)\"
+
+    # Zip the Full folder
+    $zipPath = Join-Path $relDir "$appName (Full).zip"
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($dst, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+    $zipMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+    Write-Host "[OK] ZIP  → releases\v$verCurrent\$appName (Full).zip ($zipMB MB)"
 } else {
     Write-Warning "Onedir folder not found at: $onedirBase"
 }
@@ -181,3 +239,10 @@ Write-Host "=================================================" -ForegroundColor 
 Write-Host "  BUILD COMPLETE -- NOVIVO Remote Desktop v$verCurrent" -ForegroundColor Green
 Write-Host "  Next version will be: v$verNext" -ForegroundColor Green
 Write-Host "=================================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "Output files:" -ForegroundColor Cyan
+$relDirFinal = Join-Path (Join-Path $ROOT "releases") "v$verCurrent"
+Get-ChildItem $relDirFinal -File | ForEach-Object {
+    Write-Host "  $($_.Name)  ($([math]::Round($_.Length/1MB,1)) MB)" -ForegroundColor White
+}
+Write-Host "  Folder: $relDirFinal" -ForegroundColor DarkGray

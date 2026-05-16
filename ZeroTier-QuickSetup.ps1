@@ -1,4 +1,4 @@
-# ZeroTier Quick Setup Tool
+﻿# ZeroTier Quick Setup Tool
 # Auto install ZeroTier + Enable RDP + Show connection info
 
 # ── Self-elevate to Administrator if not already ──────────────────────────────
@@ -113,7 +113,7 @@ $currentY += $rowHeight
 # ─── Multi-User Section ─────────────────────────────────────────────────────
 $userGroup = New-Object System.Windows.Forms.GroupBox
 $userGroup.Location = New-Object System.Drawing.Point($marginLeft, $currentY)
-$userGroup.Size = New-Object System.Drawing.Size(480, 155)
+$userGroup.Size = New-Object System.Drawing.Size(480, 183)
 $userGroup.Text = "Users to Configure (RDP)"
 $userGroup.Font = New-Object System.Drawing.Font("Arial", 9, [System.Drawing.FontStyle]::Bold)
 $form.Controls.Add($userGroup)
@@ -150,6 +150,35 @@ $userGrid.Columns.Add($colPassword) | Out-Null
 $userGrid.Rows.Add($env:USERNAME, "") | Out-Null
 $userGroup.Controls.Add($userGrid)
 
+# Password column: mask display with ****
+$script:showPasswords = $false
+$userGrid.Add_CellPainting({
+    param($s, $e)
+    if ($e.ColumnIndex -eq 1 -and $e.RowIndex -ge 0) {
+        $isEditing = ($s.IsCurrentCellInEditMode -and $s.CurrentCell -and $s.CurrentCell.RowIndex -eq $e.RowIndex -and $s.CurrentCell.ColumnIndex -eq 1)
+        if (-not $isEditing -and -not $script:showPasswords) {
+            $cellVal = $s.Rows[$e.RowIndex].Cells[1].Value
+            if ($null -ne $cellVal -and $cellVal.ToString().Length -gt 0) {
+                $e.PaintBackground($e.CellBounds, $true)
+                $masked = '*' * [Math]::Min($cellVal.ToString().Length, 30)
+                $sf = New-Object System.Drawing.StringFormat
+                $sf.Alignment = [System.Drawing.StringAlignment]::Near
+                $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+                $brush = New-Object System.Drawing.SolidBrush($e.CellStyle.ForeColor)
+                $r = [System.Drawing.RectangleF]::new($e.CellBounds.X + 4, $e.CellBounds.Y, $e.CellBounds.Width - 8, $e.CellBounds.Height)
+                $e.Graphics.DrawString($masked, $e.CellStyle.Font, $brush, $r, $sf)
+                $brush.Dispose(); $sf.Dispose()
+                $e.Handled = $true
+            }
+        }
+    }
+})
+$userGrid.Add_EditingControlShowing({
+    param($s, $e)
+    $tb = $e.Control -as [System.Windows.Forms.TextBox]
+    if ($tb) { $tb.UseSystemPasswordChar = ($s.CurrentCell -and $s.CurrentCell.ColumnIndex -eq 1 -and -not $script:showPasswords) }
+})
+
 # Buttons inside the group box
 $btnAddUser = New-Object System.Windows.Forms.Button
 $btnAddUser.Location = New-Object System.Drawing.Point(8, 116)
@@ -160,7 +189,7 @@ $btnAddUser.FlatStyle = "Flat"
 $btnAddUser.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
 $btnAddUser.ForeColor = [System.Drawing.Color]::White
 $btnAddUser.Add_Click({
-    $newIdx = $userGrid.Rows.Add("newuser", "")
+    $newIdx = $userGrid.Rows.Add("", "")
     $userGrid.CurrentCell = $userGrid.Rows[$newIdx].Cells["Username"]
     $userGrid.BeginEdit($true)
 })
@@ -207,11 +236,104 @@ $btnClearPass.Text = "Clear Passwords"
 $btnClearPass.Font = New-Object System.Drawing.Font("Arial", 8)
 $btnClearPass.FlatStyle = "Flat"
 $btnClearPass.Add_Click({
-    foreach ($row in $userGrid.Rows) { $row.Cells["Password"].Value = "" }
+    $cf = [System.Windows.Forms.MessageBox]::Show("Clear all passwords?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($cf -eq [System.Windows.Forms.DialogResult]::Yes) {
+        foreach ($row in $userGrid.Rows) { $row.Cells["Password"].Value = "" }
+    }
 })
 $userGroup.Controls.Add($btnClearPass)
 
-$currentY += 165
+# Row 2 buttons
+$btnSetPass = New-Object System.Windows.Forms.Button
+$btnSetPass.Location = New-Object System.Drawing.Point(8, 148)
+$btnSetPass.Size = New-Object System.Drawing.Size(220, 26)
+$btnSetPass.Text = "Set Password for Selected User"
+$btnSetPass.Font = New-Object System.Drawing.Font("Arial", 8)
+$btnSetPass.FlatStyle = "Flat"
+$btnSetPass.BackColor = [System.Drawing.Color]::FromArgb(80, 80, 160)
+$btnSetPass.ForeColor = [System.Drawing.Color]::White
+$btnSetPass.Add_Click({
+    $selRows = $userGrid.SelectedRows
+    if ($selRows.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Please select a user row first.", "Set Password", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+    $targetRow = $selRows[0]
+    $targetUser = if ($targetRow.Cells["Username"].Value) { $targetRow.Cells["Username"].Value.ToString() } else { "(unnamed)" }
+    # Build input dialog
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Set Password - $targetUser"
+    $dlg.Size = New-Object System.Drawing.Size(340, 160)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "New password for '$targetUser':"
+    $lbl.Location = New-Object System.Drawing.Point(10, 12)
+    $lbl.Size = New-Object System.Drawing.Size(300, 18)
+    $dlg.Controls.Add($lbl)
+    $txtP = New-Object System.Windows.Forms.TextBox
+    $txtP.Location = New-Object System.Drawing.Point(10, 34)
+    $txtP.Size = New-Object System.Drawing.Size(230, 22)
+    $txtP.UseSystemPasswordChar = $true
+    $txtP.Text = if ($targetRow.Cells["Password"].Value) { $targetRow.Cells["Password"].Value.ToString() } else { "" }
+    $dlg.Controls.Add($txtP)
+    $chkView = New-Object System.Windows.Forms.CheckBox
+    $chkView.Text = "Show"
+    $chkView.Location = New-Object System.Drawing.Point(248, 33)
+    $chkView.Size = New-Object System.Drawing.Size(60, 22)
+    $chkView.Add_CheckedChanged({ $txtP.UseSystemPasswordChar = -not $chkView.Checked })
+    $dlg.Controls.Add($chkView)
+    $btnRnd = New-Object System.Windows.Forms.Button
+    $btnRnd.Text = "Random"
+    $btnRnd.Location = New-Object System.Drawing.Point(10, 62)
+    $btnRnd.Size = New-Object System.Drawing.Size(80, 26)
+    $btnRnd.FlatStyle = "Flat"
+    $btnRnd.Add_Click({
+        $ch = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#"
+        $txtP.Text = -join ((1..12) | ForEach-Object { $ch[(Get-Random -Maximum $ch.Length)] })
+        $chkView.Checked = $true
+    })
+    $dlg.Controls.Add($btnRnd)
+    $btnOK = New-Object System.Windows.Forms.Button
+    $btnOK.Text = "OK"
+    $btnOK.Location = New-Object System.Drawing.Point(160, 62)
+    $btnOK.Size = New-Object System.Drawing.Size(70, 26)
+    $btnOK.FlatStyle = "Flat"
+    $btnOK.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+    $btnOK.ForeColor = [System.Drawing.Color]::White
+    $btnOK.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.AcceptButton = $btnOK
+    $dlg.Controls.Add($btnOK)
+    $btnCancel2 = New-Object System.Windows.Forms.Button
+    $btnCancel2.Text = "Cancel"
+    $btnCancel2.Location = New-Object System.Drawing.Point(238, 62)
+    $btnCancel2.Size = New-Object System.Drawing.Size(70, 26)
+    $btnCancel2.FlatStyle = "Flat"
+    $btnCancel2.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.CancelButton = $btnCancel2
+    $dlg.Controls.Add($btnCancel2)
+    $dlg.ActiveControl = $txtP
+    if ($dlg.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+        $targetRow.Cells["Password"].Value = $txtP.Text
+        $userGrid.Refresh()
+    }
+    $dlg.Dispose()
+})
+$userGroup.Controls.Add($btnSetPass)
+
+$chkShowPass = New-Object System.Windows.Forms.CheckBox
+$chkShowPass.Location = New-Object System.Drawing.Point(240, 152)
+$chkShowPass.Size = New-Object System.Drawing.Size(130, 20)
+$chkShowPass.Text = "Show Passwords"
+$chkShowPass.Font = New-Object System.Drawing.Font("Arial", 8)
+$chkShowPass.Add_CheckedChanged({
+    $script:showPasswords = $chkShowPass.Checked
+    $userGrid.Refresh()
+})
+$userGroup.Controls.Add($chkShowPass)
+
+$currentY += 215
 
 # Output TextBox
 $outputBox = New-Object System.Windows.Forms.TextBox
@@ -466,7 +588,7 @@ $btnInstall.Add_Click({
             Write-Output-Box ""
             Write-Output-Box "[2/7] Installing Tailscale..."
 
-            # Check if Tailscale already installed — skip installer if binary found and service exists
+            # Check if Tailscale already installed  -  skip installer if binary found and service exists
             $tsAlreadyInstalled = $false
             $tsPreCheckPaths = @(
                 "$env:ProgramFiles\Tailscale\tailscale.exe",
@@ -480,7 +602,7 @@ $btnInstall.Add_Click({
                 if ($tsPreGC) { $tsAlreadyInstalled = $true }
             }
             if ($tsAlreadyInstalled) {
-                Write-Output-Box "[INFO] Tailscale already installed — skipping installer"
+                Write-Output-Box "[INFO] Tailscale already installed  -  skipping installer"
             }
 
             if (-not $tsInstalledViaWinget -and -not $tsAlreadyInstalled) {
@@ -490,7 +612,7 @@ $btnInstall.Add_Click({
                         Write-Output-Box "[INFO] Installing MSI package..."
                         $tsProc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$tsInstallerPath`" /qn /norestart" -Wait -PassThru
                         if ($tsProc.ExitCode -eq 1603 -or $tsProc.ExitCode -eq 1638) {
-                            Write-Output-Box "[INFO] MSI code $($tsProc.ExitCode) — trying upgrade/repair mode..."
+                            Write-Output-Box "[INFO] MSI code $($tsProc.ExitCode)  -  trying upgrade/repair mode..."
                             $tsProc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$tsInstallerPath`" /qn /norestart REINSTALL=ALL REINSTALLMODE=vomus" -Wait -PassThru
                         }
                     } else {
@@ -624,7 +746,7 @@ $btnInstall.Add_Click({
             }
             catch { Write-Output-Box "[WARNING] Firewall: $($_.Exception.Message)" }
 
-            # Enable RDP via WMI — most reliable method on Win11 (takes effect without reboot)
+            # Enable RDP via WMI  -  most reliable method on Win11 (takes effect without reboot)
             try {
                 $tsWmiTS = Get-WmiObject -Class Win32_TerminalServiceSetting -Namespace root/cimv2/TerminalServices -ErrorAction SilentlyContinue
                 if ($tsWmiTS) {
@@ -633,7 +755,7 @@ $btnInstall.Add_Click({
                 }
             } catch { Write-Output-Box "[INFO] WMI enable: $($_.Exception.Message)" }
 
-            # Detect Windows edition — Home needs RDP Wrapper to enable hosting
+            # Detect Windows edition  -  Home needs RDP Wrapper to enable hosting
             try {
                 $tsWinEdition = (Get-WmiObject Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption
                 if ($tsWinEdition -match '\bHome\b') {
@@ -703,7 +825,7 @@ $btnInstall.Add_Click({
                         $tsUserExists = ($LASTEXITCODE -eq 0)
 
                         if (-not $tsUserExists) {
-                            $tsNetRes = & net user $username $password /add /passwordchg:no /expires:never 2>&1
+                            $tsNetRes = & net user $username $password /add /passwordchg:no /expires:never /comment:"Created by S-REMOTE Setup" 2>&1
                             $tsNetResStr = $tsNetRes | Out-String
                             if ($LASTEXITCODE -eq 0) {
                                 Write-Output-Box "[OK] User created: $username"
@@ -802,7 +924,7 @@ $btnInstall.Add_Click({
                     Write-Output-Box "[OK] Port 3389 is LISTENING"
                     $tsRdpWorking = $true
                 } else {
-                    Write-Output-Box "[WARNING] Port 3389 not yet listening — forcing second restart..."
+                    Write-Output-Box "[WARNING] Port 3389 not yet listening  -  forcing second restart..."
                     & sc.exe stop TermService 2>&1 | Out-Null
                     Start-Sleep -Seconds 4
                     & sc.exe start TermService 2>&1 | Out-Null
@@ -812,7 +934,7 @@ $btnInstall.Add_Click({
                         Write-Output-Box "[OK] Port 3389 is now LISTENING (after retry)"
                         $tsRdpWorking = $true
                     } else {
-                        Write-Output-Box "[WARNING] Port 3389 still not listening — restart required"
+                        Write-Output-Box "[WARNING] Port 3389 still not listening  -  restart required"
                         $tsRdpWorking = $false
                     }
                 }
@@ -828,7 +950,7 @@ $btnInstall.Add_Click({
                 # 1. Set Tailscale service to Automatic + network dependency + recovery restart
                 $tsSvcName2 = Get-Service -DisplayName '*Tailscale*' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Name
                 if (-not $tsSvcName2) { $tsSvcName2 = 'Tailscale' }
-                # Startup type: Automatic (delayed) — starts after network ready
+                # Startup type: Automatic (delayed)  -  starts after network ready
                 & sc.exe config $tsSvcName2 start= delayed-auto 2>&1 | Out-Null
                 # Network stack dependency
                 & sc.exe config $tsSvcName2 depend= Tcpip/Afd/Nsi 2>&1 | Out-Null
@@ -851,11 +973,11 @@ $btnInstall.Add_Click({
                     Write-Output-Box "[OK] Auth key saved for reconnection fallback"
                 }
 
-                # 3. Write reconnect helper script — logs every step for diagnostics
+                # 3. Write reconnect helper script  -  logs every step for diagnostics
                 $tsScriptPath = "$tsScriptDir\reconnect-boot.ps1"
                 $tsCliPathEsc = $tsCliPath
 @"
-# Tailscale boot reconnect — runs as SYSTEM via Scheduled Task
+# Tailscale boot reconnect  -  runs as SYSTEM via Scheduled Task
 `$logFile = "`$env:ProgramData\Tailscale\reconnect.log"
 "`$(Get-Date -f 'yyyy-MM-dd HH:mm:ss') ===== Boot reconnect START =====" | Add-Content `$logFile
 
@@ -872,7 +994,7 @@ for (`$i = 1; `$i -le 18; `$i++) {
     }
 }
 
-# Try without auth key first — --unattended is CRITICAL for headless reconnect
+# Try without auth key first  -  --unattended is CRITICAL for headless reconnect
 `$r1 = & "$tsCliPathEsc" up --unattended --accept-routes --accept-dns 2>&1 | Out-String
 "`$(Get-Date -f 'HH:mm:ss') tailscale up result: `$r1" | Add-Content `$logFile
 
@@ -889,7 +1011,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
 "@ | Set-Content -Path $tsScriptPath -Encoding UTF8 -Force
                 Write-Output-Box "[OK] Reconnect script written to $tsScriptPath"
 
-                # 4. Register Scheduled Task — trigger: AtStartup + also on event 10000 (network connected)
+                # 4. Register Scheduled Task  -  trigger: AtStartup + also on event 10000 (network connected)
                 $tsTaskName = "TailscaleAutoConnect"
                 Unregister-ScheduledTask -TaskName $tsTaskName -Confirm:$false -ErrorAction SilentlyContinue
 

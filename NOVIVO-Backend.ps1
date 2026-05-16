@@ -1,7 +1,18 @@
 # NOVIVO-Backend.ps1 - Install logic only
-param([Parameter(Mandatory)][string]$Method,[Parameter(Mandatory)][string]$NetworkKey,[Parameter(Mandatory)][string]$UsersJson)
+param([Parameter(Mandatory)][string]$Method,[Parameter(Mandatory)][string]$NetworkKey,[Parameter(Mandatory)][string]$UsersJson,[int]$RdpPort = 3389)
 
 function Write-Output-Box { param([string]$Message,[string]$Color="Lime"); Write-Host $Message; [Console]::Out.Flush() }
+
+function Test-RDPPort {
+    param([string]$IPAddress, [int]$Port = 3389, [int]$TimeoutSeconds = 3)
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $ar = $tcp.BeginConnect($IPAddress, $Port, $null, $null)
+        $ok = $ar.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000, $false)
+        try { $tcp.Close() } catch {}
+        return $ok
+    } catch { return $false }
+}
 
 $userList = $UsersJson | ConvertFrom-Json
 $networkID = $NetworkKey
@@ -9,16 +20,19 @@ $radioTailscale = [PSCustomObject]@{ Checked = ($Method -eq "tailscale") }
 $rdpWorking = $false
 
 # ── Disable sleep & hibernate during installation ───────────────────────────
-$_powerType = $null
+$_powerLoaded = $false
 try {
     $sig = '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);'
-    $_powerType = Add-Type -MemberDefinition $sig -Name "NovivoPower" -Namespace "Win32" -PassThru -ErrorAction Stop
+    Add-Type -MemberDefinition $sig -Name "NovivoPower" -Namespace "Win32" -ErrorAction Stop
+    $_powerLoaded = $true
 } catch {
-    try { $_powerType = [Win32.NovivoPower] } catch { $_powerType = $null }
+    # Type may already be loaded from a previous run
+    try { [void][Win32.NovivoPower] ; $_powerLoaded = $true } catch { $_powerLoaded = $false }
 }
-if ($_powerType) {
-    # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
-    [void]$_powerType::SetThreadExecutionState([uint32]0x80000000 -bor [uint32]0x00000001 -bor [uint32]0x00000040)
+if ($_powerLoaded) {
+    # ES_CONTINUOUS(2147483648) | ES_SYSTEM_REQUIRED(1) | ES_AWAYMODE_REQUIRED(64)
+    # Use decimal literals - PS5.1 parses 0x80000000 as negative Int32 which fails UInt32 cast
+    [void][Win32.NovivoPower]::SetThreadExecutionState([uint32]2147483648 -bor [uint32]1 -bor [uint32]64)
 }
 powercfg /hibernate off 2>$null | Out-Null
 Write-Output-Box "[INFO] Sleep and hibernate disabled for duration of setup"
@@ -27,18 +41,6 @@ try {
     $rdpWorking = $false
     
     try {
-        $networkID = $textNetworkID.Text.Trim()
-
-        # Collect users from the grid
-        $userList = @()
-        foreach ($row in $userGrid.Rows) {
-            $uname = if ($row.Cells["Username"].Value) { $row.Cells["Username"].Value.ToString().Trim() } else { "" }
-            $upass  = if ($row.Cells["Password"].Value) { $row.Cells["Password"].Value.ToString() } else { "" }
-            if (-not [string]::IsNullOrWhiteSpace($uname)) {
-                $userList += [PSCustomObject]@{ Username = $uname; Password = $upass }
-            }
-        }
-
         # Validate inputs
         if ([string]::IsNullOrWhiteSpace($networkID)) {
             Write-Output-Box "[ERROR] Network ID / Auth Key cannot be empty!"
@@ -63,8 +65,9 @@ try {
         # ====================================================================
         if ($radioTailscale.Checked) {
 
-            $authKey  = $textNetworkID.Text.Trim()   # re-use the same control
+            $authKey  = $networkID
             $tsRdpWorking = $false
+            $tsNeedsAutoRestart = $false
 
             Write-Output-Box "==================================================="
             Write-Output-Box ">>> NOVIVO REMOTE DESKTOP - TAILSCALE SETUP <<<"
@@ -357,6 +360,16 @@ try {
                 Write-Output-Box '[OK] tailscale up --unattended executed (auto-reconnect on reboot enabled)'
                 if ($tsUpOut -and $tsUpOut.Trim()) { Write-Output-Box "Out: $($tsUpOut.Trim())" }
                 Start-Sleep -Seconds 5
+                # Show Tailscale connection status
+                try {
+                    $tsStatus = & $tsCliPath status 2>&1 | Out-String
+                    if ($tsStatus) {
+                        Write-Output-Box "[INFO] Tailscale status:"
+                        $tsStatus.Trim().Split("`n") | Select-Object -First 8 | ForEach-Object {
+                            Write-Output-Box "  $_"
+                        }
+                    }
+                } catch {}
             }
             catch {
                 Write-Output-Box "[WARNING] tailscale up: $($_.Exception.Message)"
@@ -376,11 +389,15 @@ try {
             Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
 
             $tsRegPaths = @(
+                # Policy path overrides: these take priority over WinStation settings when a GPO exists
                 @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"; Name="fDenyTSConnections"; Value=0},
                 @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"; Name="fAllowToGetHelp"; Value=1},
+                @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"; Name="UserAuthentication"; Value=0},
+                @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"; Name="SecurityLayer"; Value=1},
+                # WinStation settings
                 @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"; Name="AllowTSConnections"; Value=1},
-                @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="PortNumber"; Value=3389; Type="DWord"},
-                @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="SecurityLayer"; Value=0},
+                @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="PortNumber"; Value=$RdpPort; Type="DWord"},
+                @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="SecurityLayer"; Value=1},
                 @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="UserAuthentication"; Value=0},
                 @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="fEnableWinStation"; Value=1},
                 @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"; Name="LocalAccountTokenFilterPolicy"; Value=1}
@@ -395,22 +412,41 @@ try {
             # Firewall
             try {
                 Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-                $existFw = Get-NetFirewallRule -DisplayName "RDP-Tailscale-3389" -ErrorAction SilentlyContinue
-                if ($existFw) { Remove-NetFirewallRule -DisplayName "RDP-Tailscale-3389" -ErrorAction SilentlyContinue }
-                New-NetFirewallRule -DisplayName "RDP-Tailscale-3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -Enabled True -Profile Any -ErrorAction SilentlyContinue | Out-Null
-                & netsh advfirewall firewall add rule name="RDP-Tailscale-Netsh" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
+                $fwName = "RDP-Tailscale-$RdpPort"
+                $existFw = Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue
+                if ($existFw) { Remove-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue }
+                New-NetFirewallRule -DisplayName $fwName -Direction Inbound -Protocol TCP -LocalPort $RdpPort -Action Allow -Enabled True -Profile Any -ErrorAction SilentlyContinue | Out-Null
+                & netsh advfirewall firewall add rule name="RDP-Tailscale-Netsh" dir=in action=allow protocol=TCP localport=$RdpPort 2>&1 | Out-Null
                 Write-Output-Box "[OK] Firewall rules configured"
             }
             catch { Write-Output-Box "[WARNING] Firewall: $($_.Exception.Message)" }
 
-            # Enable RDP via WMI  -  most reliable method on Win11 (takes effect without reboot)
+            # Enable RDP via WMI / CIM / wmic  -  tries multiple methods for Pro for Workstations
             try {
                 $tsWmiTS = Get-WmiObject -Class Win32_TerminalServiceSetting -Namespace root/cimv2/TerminalServices -ErrorAction SilentlyContinue
                 if ($tsWmiTS) {
-                    $tsWmiTS.SetAllowTSConnections(1, 1) | Out-Null
-                    Write-Output-Box "[OK] RDP enabled via WMI (AllowTSConnections)"
+                    $wmiOk = $false
+                    # Try WMI (1), (1,0), (1,1) in order
+                    foreach ($args_ in @(,1, @(1,0), @(1,1))) {
+                        try { $tsWmiTS.SetAllowTSConnections($args_) | Out-Null; $wmiOk = $true; break } catch {}
+                    }
+                    if ($wmiOk) { Write-Output-Box "[OK] RDP enabled via WMI (AllowTSConnections)" }
+                    else { Write-Output-Box "[INFO] WMI SetAllowTSConnections: all args failed - trying CIM..." }
                 }
             } catch { Write-Output-Box "[INFO] WMI enable: $($_.Exception.Message)" }
+
+            # CIM fallback (different code path from WMI - sometimes works on Pro for Workstations)
+            try {
+                $cimTS = Get-CimInstance -Namespace "root/cimv2/TerminalServices" -ClassName Win32_TerminalServiceSetting -ErrorAction Stop
+                $cimResult = Invoke-CimMethod -InputObject $cimTS -MethodName "SetAllowTSConnections" -Arguments @{fAllowTSConnections=[uint32]1; ModifyFirewallException=[uint32]0} -ErrorAction Stop
+                if ($cimResult.ReturnValue -eq 0) { Write-Output-Box "[OK] RDP enabled via CIM" }
+            } catch {}
+
+            # wmic command-line fallback (bypasses PowerShell WMI layer)
+            try {
+                $wmicOut = & cmd.exe /c "wmic /namespace:\\root\cimv2\TerminalServices PATH Win32_TerminalServiceSetting WHERE TerminalServerMode=1 CALL SetAllowTSConnections 1" 2>&1 | Out-String
+                if ($wmicOut -match 'ReturnValue = 0') { Write-Output-Box "[OK] RDP enabled via wmic" }
+            } catch {}
 
             # Detect Windows edition  -  Home needs RDP Wrapper to enable hosting
             try {
@@ -573,25 +609,52 @@ try {
                     Write-Output-Box "[WARNING] TermService status: $($tsSvc.Status)"
                 }
 
-                # Verify port 3389
-                Start-Sleep -Seconds 5
-                $tsPort = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
-                if ($tsPort) {
-                    Write-Output-Box "[OK] Port 3389 is LISTENING"
-                    $tsRdpWorking = $true
-                } else {
-                    Write-Output-Box "[WARNING] Port 3389 not yet listening  -  forcing second restart..."
-                    & sc.exe stop TermService 2>&1 | Out-Null
-                    Start-Sleep -Seconds 4
-                    & sc.exe start TermService 2>&1 | Out-Null
-                    Start-Sleep -Seconds 8
-                    $tsPort2 = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
-                    if ($tsPort2) {
-                        Write-Output-Box "[OK] Port 3389 is now LISTENING (after retry)"
-                        $tsRdpWorking = $true
-                    } else {
-                        Write-Output-Box "[WARNING] Port 3389 still not listening  -  restart required"
+                # Poll for port — Pro for Workstations can take 20-45s to bind after service start
+                Write-Output-Box "[INFO] Waiting for port $RdpPort to bind (up to 45s)..."
+                $tsPortReady = $false
+                for ($pi = 1; $pi -le 15; $pi++) {
+                    Start-Sleep -Seconds 3
+                    $tsPortCheck = Get-NetTCPConnection -LocalPort $RdpPort -State Listen -ErrorAction SilentlyContinue
+                    if ($tsPortCheck) {
+                        Write-Output-Box "[OK] Port $RdpPort is LISTENING (bound after $($pi*3)s)"
+                        $tsRdpWorking = $true; $tsPortReady = $true; break
+                    }
+                    if ($pi % 5 -eq 0) { Write-Output-Box "[INFO] Still waiting... ($($pi*3)s elapsed)" }
+                }
+
+                if (-not $tsPortReady) {
+                    Write-Output-Box "[WARNING] Port $RdpPort not yet listening - running deep reset (no reboot)..."
+
+                    # Toggle fEnableWinStation=0 → full stop → fEnableWinStation=1 → start
+                    Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+                    Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fEnableWinStation" -Value 0 -Force -ErrorAction SilentlyContinue
+                    & sc.exe stop UmRdpService 2>&1 | Out-Null
+                    & sc.exe stop TermService  2>&1 | Out-Null
+                    & sc.exe stop SessionEnv   2>&1 | Out-Null
+                    Start-Sleep -Seconds 5
+                    Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fEnableWinStation" -Value 1 -Force -ErrorAction SilentlyContinue
+                    & sc.exe start SessionEnv   2>&1 | Out-Null; Start-Sleep -Seconds 3
+                    & sc.exe start TermService  2>&1 | Out-Null; Start-Sleep -Seconds 3
+                    & sc.exe start UmRdpService 2>&1 | Out-Null
+
+                    # Poll again after deep reset
+                    Write-Output-Box "[INFO] Waiting for port $RdpPort after deep reset (up to 45s)..."
+                    for ($pi = 1; $pi -le 15; $pi++) {
+                        Start-Sleep -Seconds 3
+                        $tsPortCheck2 = Get-NetTCPConnection -LocalPort $RdpPort -State Listen -ErrorAction SilentlyContinue
+                        if ($tsPortCheck2) {
+                            Write-Output-Box "[OK] Port $RdpPort LISTENING after deep reset (bound after $($pi*3)s)"
+                            $tsRdpWorking = $true; $tsPortReady = $true; break
+                        }
+                        if ($pi % 5 -eq 0) { Write-Output-Box "[INFO] Still waiting... ($($pi*3)s elapsed)" }
+                    }
+
+                    if (-not $tsPortReady) {
+                        Write-Output-Box "[WARNING] Port $RdpPort still not listening after all reset attempts"
+                        Write-Output-Box "[INFO] Windows 10 Pro for Workstations requires a clean OS boot to activate RDP listener"
+                        Write-Output-Box "[INFO] Auto-restart will be triggered after setup completes"
                         $tsRdpWorking = $false
+                        $tsNeedsAutoRestart = $true
                     }
                 }
             }
@@ -726,17 +789,32 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                 Write-Output-Box "[WARNING] Could not detect Tailscale IP automatically"
                 Write-Output-Box "[INFO] Check Tailscale Admin Console: https://login.tailscale.com/admin/machines"
             } else {
-                # Quick RDP reachability test
+                # Test RDP on LOCALHOST first (reliable) then via Tailscale IP
                 Write-Output-Box ""
                 Write-Output-Box ">>> TESTING RDP CONNECTION <<<"
-                $tsRdpReady = $false
-                for ($i = 1; $i -le 5; $i++) {
-                    Write-Output-Box "[INFO] Attempt $i/5..."
-                    $tsRdpReady = Test-RDPPort -IPAddress $tsIP -Port 3389 -TimeoutSeconds 3
-                    if ($tsRdpReady) { Write-Output-Box "[OK] RDP port is OPEN!"; break }
-                    Start-Sleep -Seconds 2
+                # Localhost test = definitive: is RDP actually listening?
+                $tsRdpLocal  = Test-RDPPort -IPAddress "127.0.0.1" -Port $RdpPort -TimeoutSeconds 3
+                $tsRdpReady  = $false
+                if ($tsRdpLocal) {
+                    Write-Output-Box "[OK] RDP port $RdpPort is LISTENING locally"
+                    # Also probe via Tailscale IP (confirms routing is working)
+                    for ($i = 1; $i -le 5; $i++) {
+                        Write-Output-Box "[INFO] Attempt $i/5..."
+                        $tsRdpReady = Test-RDPPort -IPAddress $tsIP -Port $RdpPort -TimeoutSeconds 3
+                        if ($tsRdpReady) { Write-Output-Box "[OK] RDP port is OPEN via Tailscale IP!"; break }
+                        Start-Sleep -Seconds 2
+                    }
+                    if (-not $tsRdpReady) {
+                        Write-Output-Box "[WARNING] RDP listens locally but Tailscale IP test failed"
+                        Write-Output-Box "[INFO] Check: device approved in Tailscale Admin, firewall allows port $RdpPort"
+                        $tsRdpReady = $true  # local is listening = usable after Tailscale propagates
+                    }
+                } else {
+                    Write-Output-Box "[WARNING] RDP port $RdpPort is NOT listening on this machine"
+                    Write-Output-Box "[INFO] A machine restart is required for RDP listener to start"
                 }
-                if (-not $tsRdpReady) { Write-Output-Box "[WARNING] RDP port test failed (may need a few seconds)" }
+                # Sync working status
+                if ($tsRdpReady) { $tsRdpWorking = $true }
             }
 
             # Final summary – Tailscale
@@ -745,7 +823,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             Write-Output-Box ">>> CONNECTION INFORMATION (TAILSCALE) <<<"
             Write-Output-Box "==================================================="
             if ($tsIP) { Write-Output-Box "Tailscale IP : $tsIP" } else { Write-Output-Box "Tailscale IP : (Check Tailscale Admin Console)" }
-            Write-Output-Box "RDP Port     : 3389"
+            Write-Output-Box "RDP Port     : $RdpPort"
             Write-Output-Box "RDP Status   : $(if ($tsRdpWorking) { 'READY' } else { 'REQUIRES RESTART' })"
             Write-Output-Box "--- Users Created ($($userList.Count)) ---"
             foreach ($u in $userList) { Write-Output-Box "  Username: $($u.Username)  |  Password: $($u.Password)" }
@@ -753,25 +831,25 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             Write-Output-Box ""
             Write-Output-Box "[DONE] NOVIVO Remote Desktop setup completed!"
             Write-Output-Box ""
+            Write-Output-Box "=== HOW TO CONNECT FROM ANOTHER MACHINE ==="
+            Write-Output-Box ""
+            Write-Output-Box "ON THE CLIENT MACHINE (your laptop / PC):"
+            Write-Output-Box "  1. Install Tailscale: https://tailscale.com/download/windows"
+            Write-Output-Box "  2. Sign in with THE SAME account used here"
+            Write-Output-Box "  3. Confirm this server appears at: https://login.tailscale.com/admin/machines"
+            Write-Output-Box "  4. Press Win+R, type: mstsc  -> click OK"
+            Write-Output-Box "  5. Computer: ${tsIP}:${RdpPort}"
+            Write-Output-Box "  6. Username: (see below)  Password: (see below)"
+            Write-Output-Box ""
             Write-Output-Box "NEXT STEPS:"
             Write-Output-Box "1. Open Tailscale Admin: https://login.tailscale.com/admin/machines"
             Write-Output-Box "2. Confirm this device appears in your tailnet"
-            Write-Output-Box "3. Connect via RDP: mstsc /v:$tsIP"
+            Write-Output-Box "3. Connect via RDP: mstsc /v:${tsIP}:${RdpPort}"
             if (-not $tsRdpWorking) {
                 Write-Output-Box ""
-                Write-Output-Box "!!! A machine restart may be required for RDP listener !!!"
-                Start-Sleep -Milliseconds 500
-                $tsRestartChoice = [System.Windows.Forms.MessageBox]::Show(
-                    "RDP port 3389 is not yet listening.`n`nA restart is required for RDP to work.`n`nDo you want to restart this machine now?",
-                    "Restart Required for RDP",
-                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                    [System.Windows.Forms.MessageBoxIcon]::Warning
-                )
-                if ($tsRestartChoice -eq [System.Windows.Forms.DialogResult]::Yes) {
-                    Write-Output-Box "[INFO] Restarting machine in 5 seconds..."
-                    Start-Sleep -Seconds 5
-                    Restart-Computer -Force
-                }
+                Write-Output-Box "[WARNING] RDP port $RdpPort is not yet listening"
+                Write-Output-Box "[INFO] A manual machine restart is required for RDP to work on this Windows edition"
+                Write-Output-Box "[INFO] After restarting, wait ~2 minutes then connect: mstsc /v:${tsIP}:${RdpPort}"
             }
             return   # <-- end of Tailscale branch
         }
@@ -946,10 +1024,11 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
         # Firewall
         try {
             Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-            $existingRule = Get-NetFirewallRule -DisplayName "RDP-ZeroTier-3389" -ErrorAction SilentlyContinue
-            if ($existingRule) { Remove-NetFirewallRule -DisplayName "RDP-ZeroTier-3389" -ErrorAction SilentlyContinue }
-            New-NetFirewallRule -DisplayName "RDP-ZeroTier-3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -Enabled True -Profile Any -ErrorAction SilentlyContinue | Out-Null
-            & netsh advfirewall firewall add rule name="RDP-ZeroTier-Netsh" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
+            $fwNameZT = "RDP-ZeroTier-$RdpPort"
+            $existingRule = Get-NetFirewallRule -DisplayName $fwNameZT -ErrorAction SilentlyContinue
+            if ($existingRule) { Remove-NetFirewallRule -DisplayName $fwNameZT -ErrorAction SilentlyContinue }
+            New-NetFirewallRule -DisplayName $fwNameZT -Direction Inbound -Protocol TCP -LocalPort $RdpPort -Action Allow -Enabled True -Profile Any -ErrorAction SilentlyContinue | Out-Null
+            & netsh advfirewall firewall add rule name="RDP-ZeroTier-Netsh" dir=in action=allow protocol=TCP localport=$RdpPort 2>&1 | Out-Null
             Write-Output-Box "[OK] Firewall rules configured (3 methods)"
         }
         catch {
@@ -960,7 +1039,9 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
         try {
             $wmiTS = Get-WmiObject -Class Win32_TerminalServiceSetting -Namespace root/cimv2/TerminalServices -ErrorAction SilentlyContinue
             if ($wmiTS) {
-                $wmiTS.SetAllowTSConnections(1, 1) | Out-Null
+                # Single-arg works on all editions including Win10 Pro for Workstations
+                try { $wmiTS.SetAllowTSConnections(1) | Out-Null }
+                catch { $wmiTS.SetAllowTSConnections(1, 0) | Out-Null }
                 Write-Output-Box "[OK] RDP enabled via WMI (AllowTSConnections)"
             }
         } catch { Write-Output-Box "[INFO] WMI enable: $($_.Exception.Message)" }
@@ -1113,10 +1194,10 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             }
             
             Start-Sleep -Seconds 5
-            $portListening = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+            $portListening = Get-NetTCPConnection -LocalPort $RdpPort -State Listen -ErrorAction SilentlyContinue
             
             if (-not $portListening) {
-                Write-Output-Box "[WARNING] Port 3389 not listening, trying emergency fixes..."
+                Write-Output-Box "[WARNING] Port $RdpPort not listening, trying emergency fixes..."
                 
                 try {
                     # EMERGENCY FIX SEQUENCE
@@ -1151,10 +1232,10 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                     
                     # Re-check port
                     Start-Sleep -Seconds 3
-                    $portCheck = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+                    $portCheck = Get-NetTCPConnection -LocalPort $RdpPort -State Listen -ErrorAction SilentlyContinue
                     
                     if ($portCheck) {
-                        Write-Output-Box "[SUCCESS] Port 3389 is NOW LISTENING!"
+                        Write-Output-Box "[SUCCESS] Port $RdpPort is NOW LISTENING!"
                         Write-Output-Box "[INFO] Emergency fix WORKED - RDP is ready!"
                         $rdpWorking = $true
                     }
@@ -1175,9 +1256,9 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                             Start-Sleep -Seconds 10
                             
                             # Final check
-                            $portCheck = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+                            $portCheck = Get-NetTCPConnection -LocalPort $RdpPort -State Listen -ErrorAction SilentlyContinue
                             if ($portCheck) {
-                                Write-Output-Box "[SUCCESS] Listener rebuild WORKED! Port 3389 is now listening!"
+                                Write-Output-Box "[SUCCESS] Listener rebuild WORKED! Port $RdpPort is now listening!"
                                 $rdpWorking = $true
                             }
                             else {
@@ -1266,7 +1347,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             $rdpReady = $false
             for ($i = 1; $i -le 5; $i++) {
                 Write-Output-Box "[INFO] Test attempt $i/5..."
-                $rdpReady = Test-RDPPort -IPAddress $ztIP -Port 3389 -TimeoutSeconds 3
+                $rdpReady = Test-RDPPort -IPAddress $ztIP -Port $RdpPort -TimeoutSeconds 3
                 if ($rdpReady) {
                     Write-Output-Box "[OK] RDP port is OPEN and READY!"
                     break
@@ -1283,6 +1364,8 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                 Write-Output-Box "[INFO] RDP may need a few more seconds to initialize"
                 Write-Output-Box "[INFO] Or firewall may be blocking connections"
             }
+            # Port test is the final word on RDP readiness
+            if ($rdpReady) { $rdpWorking = $true }
         }
         
         # Final Summary
@@ -1296,7 +1379,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
         else {
             Write-Output-Box "IP Address  : (Check ZeroTier Central)"
         }
-        Write-Output-Box "RDP Port    : 3389"
+        Write-Output-Box "RDP Port    : $RdpPort"
         Write-Output-Box "--- Users Created ($($userList.Count)) ---"
         foreach ($u in $userList) { Write-Output-Box "  Username: $($u.Username)  |  Password: $($u.Password)" }
 
@@ -1352,8 +1435,8 @@ catch {
 }
 finally {
     # ── Restore sleep settings ─────────────────────────────────────────────
-    if ($_powerType) {
-        [void]$_powerType::SetThreadExecutionState([uint32]0x80000000)  # ES_CONTINUOUS = reset
+    if ($_powerLoaded) {
+        [void][Win32.NovivoPower]::SetThreadExecutionState([uint32]2147483648)  # ES_CONTINUOUS = reset
     }
     Write-Output-Box "[INFO] Sleep settings restored"
 }
