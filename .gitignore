@@ -17,6 +17,7 @@ temp-*.txt
 # ── User-specific ─────────────────────────────────────────────────────────────
 servers.json
 .venv/
+.env
 
 # ── Releases are tracked (intentionally NOT ignored) ─────────────────────────
 # releases/   ← keep in git so GitHub has download assets

@@ -16,7 +16,6 @@ function Test-RDPPort {
 
 $userList = $UsersJson | ConvertFrom-Json
 $networkID = $NetworkKey
-$radioTailscale = [PSCustomObject]@{ Checked = ($Method -eq "tailscale") }
 $rdpWorking = $false
 
 # ── Disable sleep & hibernate during installation ───────────────────────────
@@ -63,7 +62,7 @@ try {
         # ====================================================================
         #  TAILSCALE BRANCH  – runs when user selects Tailscale method
         # ====================================================================
-        if ($radioTailscale.Checked) {
+        if ($Method -eq "tailscale") {
 
             $authKey  = $networkID
             $tsRdpWorking = $false
@@ -95,17 +94,21 @@ try {
             }
 
             $tsDownloaded = $false
-            if (-not $tsInstalledViaWinget) {
+            # Check if already installed — skip download entirely if found
+            $tsAlreadyInstalled = $false
+            foreach ($tsPC in @("$env:ProgramFiles\Tailscale\tailscale.exe", 'C:\Program Files (x86)\Tailscale\tailscale.exe')) {
+                if (Test-Path $tsPC) { $tsAlreadyInstalled = $true; break }
+            }
+            if (-not $tsAlreadyInstalled) {
+                $tsPreGC = Get-Command tailscale -ErrorAction SilentlyContinue
+                if ($tsPreGC) { $tsAlreadyInstalled = $true }
+            }
+            if (-not $tsInstalledViaWinget -and -not $tsAlreadyInstalled) {
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
                 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-                # Windows .exe = no arch suffix; .msi = has arch suffix
-                $tsMsiArch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'x86' }
                 $tsUrls = @(
-                    "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe",
-                    "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.2.exe",
-                    "https://pkgs.tailscale.com/stable/tailscale-setup-full-1.94.2.exe",
-                    "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.2-$tsMsiArch.msi"
+                    "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
                 )
 
                 foreach ($tsUrl in $tsUrls) {
@@ -164,19 +167,6 @@ try {
             Write-Output-Box ""
             Write-Output-Box "[2/7] Installing Tailscale..."
 
-            # Check if Tailscale already installed  -  skip installer if binary found and service exists
-            $tsAlreadyInstalled = $false
-            $tsPreCheckPaths = @(
-                "$env:ProgramFiles\Tailscale\tailscale.exe",
-                'C:\Program Files (x86)\Tailscale\tailscale.exe'
-            )
-            foreach ($tsPC in $tsPreCheckPaths) {
-                if (Test-Path $tsPC) { $tsAlreadyInstalled = $true; break }
-            }
-            if (-not $tsAlreadyInstalled) {
-                $tsPreGC = Get-Command tailscale -ErrorAction SilentlyContinue
-                if ($tsPreGC) { $tsAlreadyInstalled = $true }
-            }
             if ($tsAlreadyInstalled) {
                 Write-Output-Box "[INFO] Tailscale already installed  -  skipping installer"
             }
@@ -259,49 +249,12 @@ try {
                 }
             } catch { }
 
-            # ── Configure Tailscale to start BEFORE Windows login screen ─────────
-            # Method 1: Windows Service — set to Automatic (not delayed) so it
-            #            starts at kernel/boot time, well before any user logs in.
+            # ── Configure Tailscale user-session autostart (Startup folder + Run key)
+            # Full boot-time config (service + scheduled task) is handled in step 6.5
             Write-Output-Box ""
-            Write-Output-Box "[INFO] Configuring Tailscale boot-time autostart..."
-            try {
-                Set-Service -Name $tsSvcName -StartupType Automatic -ErrorAction SilentlyContinue
-                # Remove any 'delayed auto-start' flag so it starts immediately at boot
-                & sc.exe config $tsSvcName start= auto 2>&1 | Out-Null
-                & sc.exe config $tsSvcName delayed-auto= no  2>&1 | Out-Null
-                Write-Output-Box "[OK] Tailscale service startup type: Automatic (no delay)"
-            } catch {
-                Write-Output-Box "[WARNING] Service config: $($_.Exception.Message)"
-            }
+            Write-Output-Box "[INFO] Configuring Tailscale user-session autostart..."
 
-            # Method 2: Task Scheduler at System Startup (SYSTEM account)
-            # Runs as SYSTEM before any user login — even on the lock screen.
-            try {
-                $tsTaskName  = "Tailscale-BootAutostart"
-                $tsBinPath   = if ($tsCliPath) { $tsCliPath } else { 'tailscale.exe' }
-                Unregister-ScheduledTask -TaskName $tsTaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-
-                $tsAction    = New-ScheduledTaskAction -Execute $tsBinPath -Argument "start" 
-                $tsTrigger   = New-ScheduledTaskTrigger -AtStartup
-                $tsPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-                $tsSettings  = New-ScheduledTaskSettingsSet `
-                                    -AllowStartIfOnBatteries `
-                                    -DontStopIfGoingOnBatteries `
-                                    -StartWhenAvailable `
-                                    -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
-                Register-ScheduledTask `
-                    -TaskName  $tsTaskName `
-                    -Action    $tsAction `
-                    -Trigger   $tsTrigger `
-                    -Principal $tsPrincipal `
-                    -Settings  $tsSettings `
-                    -Force | Out-Null
-                Write-Output-Box "[OK] Scheduled Task '$tsTaskName' registered (SYSTEM, AtStartup)"
-            } catch {
-                Write-Output-Box "[WARNING] Scheduled Task: $($_.Exception.Message)"
-            }
-
-            # Method 3: All-Users Startup folder (fallback for after login)
+            # Method 1: All-Users Startup folder (fallback for after login)
             try {
                 $tsTrayExe = $null
                 $tsTrayPaths = @(
@@ -341,7 +294,7 @@ try {
                 Write-Output-Box "[WARNING] HKLM Run key: $($_.Exception.Message)"
             }
 
-            Write-Output-Box "[OK] Tailscale autostart configured (4 methods: Service/Task/Startup/Run)"
+            Write-Output-Box "[OK] Tailscale user-session autostart configured (Startup folder + Run key)"
 
             # TS-STEP 3: Connect / bring up Tailscale
             Write-Output-Box ''
@@ -366,7 +319,7 @@ try {
                     if ($tsStatus) {
                         Write-Output-Box "[INFO] Tailscale status:"
                         $tsStatus.Trim().Split("`n") | Select-Object -First 8 | ForEach-Object {
-                            Write-Output-Box "  $_"
+                            Write-Output-Box "  $($_.TrimEnd())"
                         }
                     }
                 } catch {}
@@ -768,7 +721,6 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             # TS-STEP 7: Get Tailscale IP
             Write-Output-Box ""
             Write-Output-Box "[7/7] Getting Tailscale IP address..."
-            Start-Sleep -Seconds 5
 
             $tsIP = $null
             for ($tsAttempt = 1; $tsAttempt -le 12; $tsAttempt++) {
@@ -845,7 +797,21 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             Write-Output-Box "1. Open Tailscale Admin: https://login.tailscale.com/admin/machines"
             Write-Output-Box "2. Confirm this device appears in your tailnet"
             Write-Output-Box "3. Connect via RDP: mstsc /v:${tsIP}:${RdpPort}"
-            if (-not $tsRdpWorking) {
+            if ($tsNeedsAutoRestart) {
+                Write-Output-Box ""
+                Write-Output-Box "!!! AUTO-RESTART IN 30 SECONDS !!!"
+                Write-Output-Box "[INFO] RDP listener cannot start on this Windows edition without a clean boot"
+                Write-Output-Box "[INFO] Everything is configured. After restart Tailscale will reconnect automatically."
+                Write-Output-Box "[INFO] Wait ~2-3 minutes after restart, then connect: mstsc /v:${tsIP}:${RdpPort}"
+                Write-Output-Box ""
+                try {
+                    & shutdown.exe /r /t 30 /c "NOVIVO: activating RDP" 2>&1 | Out-Null
+                    Write-Output-Box "[OK] Restart scheduled (30s). App will close shortly."
+                } catch {
+                    Write-Output-Box "[WARNING] Could not schedule restart: $($_.Exception.Message)"
+                    Write-Output-Box "[INFO] Please run manually: shutdown /r /t 0"
+                }
+            } elseif (-not $tsRdpWorking) {
                 Write-Output-Box ""
                 Write-Output-Box "[WARNING] RDP port $RdpPort is not yet listening"
                 Write-Output-Box "[INFO] A manual machine restart is required for RDP to work on this Windows edition"
