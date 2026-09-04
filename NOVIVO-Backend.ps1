@@ -1,5 +1,5 @@
 ﻿# NOVIVO-Backend.ps1 - Install logic only
-param([Parameter(Mandatory)][string]$Method,[Parameter(Mandatory)][string]$NetworkKey,[Parameter(Mandatory)][string]$UsersJson,[int]$RdpPort = 3389)
+param([Parameter(Mandatory)][string]$Method,[string]$NetworkKey,[string]$UsersJson,[int]$RdpPort = 3389,[switch]$PreflightOnly)
 
 function Write-Output-Box { param([string]$Message,[string]$Color="Lime"); Write-Host $Message; [Console]::Out.Flush() }
 
@@ -41,9 +41,434 @@ function Test-RdpListener {
     return $true      # owner could not be determined - accept "something is listening"
 }
 
-$userList = $UsersJson | ConvertFrom-Json
+# ═══════════════════════════════════════════════════════════════════════════
+#  OS SUPPORT PREFLIGHT
+#  Not every Windows can host this. Establish that before downloading 20 MB of
+#  installer and failing on step 7 with "tailscale.exe not found".
+# ═══════════════════════════════════════════════════════════════════════════
+
+function Get-NovivoOSInfo {
+    # Build number is the only trustworthy gate: Caption is localised, and
+    # ProductName still reads "Windows 10" on Windows 11.
+    $info = [ordered]@{
+        Build = 0; UBR = 0; Caption = 'Unknown'
+        IsHome = $false; IsServer = $false; IsSMode = $false
+        Is64Bit = [Environment]::Is64BitOperatingSystem
+    }
+    try {
+        $cv = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $info.Build = [int](Get-ItemProperty -Path $cv -Name CurrentBuildNumber -ErrorAction Stop).CurrentBuildNumber
+        $ubr = Get-ItemProperty -Path $cv -Name UBR -ErrorAction SilentlyContinue
+        if ($ubr) { $info.UBR = [int]$ubr.UBR }
+    } catch {
+        try { $info.Build = [Environment]::OSVersion.Version.Build } catch { }
+    }
+    $os = $null
+    try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop }
+    catch { try { $os = Get-WmiObject Win32_OperatingSystem -ErrorAction Stop } catch { } }
+    if ($os) {
+        $info.Caption  = $os.Caption
+        $info.IsServer = ($os.ProductType -ne 1)
+        # SKU beats the localised Caption. 2/3/5 = Home Basic/Premium/N,
+        # 98..101 = Core / Core N / Core Single Language / Core Country Specific
+        if ($null -ne $os.OperatingSystemSKU) {
+            $info.IsHome = (@(2,3,5,98,99,100,101) -contains [int]$os.OperatingSystemSKU)
+        }
+    }
+    if (-not $info.IsHome -and $info.Caption -match '\bHome\b|\bCore\b') { $info.IsHome = $true }
+    # S mode locks the machine to Store apps - no installer of ours can run.
+    try {
+        $ci = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name SkuPolicyRequired -ErrorAction SilentlyContinue
+        if ($ci -and [int]$ci.SkuPolicyRequired -eq 1) { $info.IsSMode = $true }
+    } catch { }
+    return [pscustomobject]$info
+}
+
+function Test-NovivoOSSupport {
+    # $true = setup may continue. On $false the reason has already been printed.
+    param([string]$Method, $OSInfo)
+
+    $bits = '32-bit'
+    if ($OSInfo.Is64Bit) { $bits = '64-bit' }
+    $ed = 'Pro/Enterprise'
+    if ($OSInfo.IsHome) { $ed = 'Home' }
+    Write-Output-Box "[INFO] Windows: $($OSInfo.Caption)"
+    Write-Output-Box "[INFO] Build $($OSInfo.Build).$($OSInfo.UBR) - $bits - edition family: $ed"
+
+    if ($OSInfo.IsSMode) {
+        Write-Output-Box ""
+        Write-Output-Box "[ERROR] This PC runs Windows in S mode."
+        Write-Output-Box "[INFO] S mode only permits apps from the Microsoft Store, so neither"
+        Write-Output-Box "[INFO] Tailscale nor ZeroTier can be installed."
+        Write-Output-Box "[INFO] Fix: Settings > System > Activation > 'Switch out of S mode'"
+        Write-Output-Box "[INFO] (one-way change - there is no way back to S mode afterwards)"
+        return $false
+    }
+
+    if ($Method -eq 'tailscale' -and $OSInfo.Build -lt 17763) {
+        $name = "Windows 10 build $($OSInfo.Build) (older than 1809)"
+        if     ($OSInfo.Build -lt 9200)  { $name = 'Windows 7 / Server 2008 R2' }
+        elseif ($OSInfo.Build -lt 9600)  { $name = 'Windows 8 / Server 2012' }
+        elseif ($OSInfo.Build -eq 9600)  { $name = 'Windows 8.1 / Server 2012 R2' }
+        Write-Output-Box ""
+        Write-Output-Box "[ERROR] Tailscale does not support $name."
+        Write-Output-Box "[INFO] Tailscale needs Windows 10 build 17763 (version 1809) or newer,"
+        Write-Output-Box "[INFO] Windows 11, or Windows Server 2019 and later. Support for"
+        Write-Output-Box "[INFO] Windows 7 and 8.1 was dropped by Tailscale in 2023."
+        Write-Output-Box ""
+        Write-Output-Box "[INFO] >>> Use the ZeroTier method instead - it still runs on this Windows."
+        Write-Output-Box "[INFO] Switch the method to ZeroTier in the app and paste a ZeroTier"
+        Write-Output-Box "[INFO] Network ID (16 hex characters) in place of the Tailscale auth key."
+        Write-Output-Box "[INFO] The switch cannot be made automatically: a Tailscale auth key is"
+        Write-Output-Box "[INFO] not a ZeroTier Network ID, so there is no credential to carry over."
+        return $false
+    }
+
+    if ($Method -ne 'tailscale' -and $OSInfo.Build -lt 7601) {
+        Write-Output-Box ""
+        Write-Output-Box "[ERROR] ZeroTier needs Windows 7 SP1 (build 7601) or newer."
+        return $false
+    }
+    if ($Method -ne 'tailscale' -and $OSInfo.Build -lt 10240) {
+        Write-Output-Box "[WARNING] ZeroTier no longer targets this Windows version - the installer"
+        Write-Output-Box "[WARNING] may fail or the virtual adapter may not load. Continuing anyway."
+    }
+
+    return $true
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WINDOWS HOME RDP SUPPORT
+#  Home ships no RDP host. RDP Wrapper is the usual fix, but "installed" is not
+#  "working": rdpwrap.ini carries one section per Windows build and is routinely
+#  months behind, so the wrapper loads while RDP stays dead. Every step below is
+#  therefore verified, with a termsrv.dll patch as the fallback.
+# ═══════════════════════════════════════════════════════════════════════════
+
+function Add-NovivoDefenderExclusion {
+    # Defender flags both RDPWrap and a patched termsrv.dll as
+    # HackTool:Win32/RDPWrap and deletes them mid-install. Best-effort only:
+    # Defender may be off, policy-locked, or replaced by a third-party AV.
+    # ProgramData\NOVIVO holds the generated repair script, which Defender also
+    # scans (as script content) each time the boot task runs it.
+    $paths = @("$env:TEMP", "$env:ProgramFiles\RDP Wrapper",
+               "$env:SystemRoot\System32\termsrv.dll", "$env:ProgramData\NOVIVO")
+    $added = 0
+    foreach ($p in $paths) {
+        try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop ; $added++ } catch { }
+    }
+    try { Add-MpPreference -ExclusionProcess 'RDPWInst.exe' -ErrorAction SilentlyContinue } catch { }
+    if ($added -gt 0) {
+        Write-Output-Box "[OK] Defender exclusions added ($added of $($paths.Count) paths)"
+    } else {
+        Write-Output-Box "[INFO] Defender exclusions not applied (Defender disabled, policy-locked, or 3rd-party AV)"
+    }
+}
+
+function Test-RdpWrapActive {
+    # Proof of life, not proof of installation: rdpwrap.dll actually mapped into
+    # the TermService host process, plus a listener owned by that process.
+    param([int]$Port)
+    $loaded = $false
+    try {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='TermService'" -ErrorAction Stop
+        if ($svc -and $svc.ProcessId) {
+            $proc = Get-Process -Id $svc.ProcessId -ErrorAction SilentlyContinue
+            if ($proc) {
+                try { $loaded = [bool](@($proc.Modules) | Where-Object { $_.ModuleName -eq 'rdpwrap.dll' }) } catch { }
+            }
+        }
+    } catch { }
+    $listening = Test-RdpListener -Port $Port
+    return [pscustomobject]@{ WrapperLoaded = $loaded; Listening = $listening; Ok = $listening }
+}
+
+function New-NovivoRepairScript {
+    # One generated file is the single source of truth for repairing RDP, used
+    # both as the install-time fallback and as the boot-time scheduled task.
+    $dir = "$env:ProgramData\NOVIVO"
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $path = Join-Path $dir 'Repair-NovivoRdp.ps1'
+    $body = @'
+# NOVIVO RDP repair - re-arms RDP hosting on Windows Home.
+# Generated by NOVIVO Remote Desktop. Runs at boot and on demand.
+param([int]$Port = __PORT__, [switch]$PatchOnly)
+
+$LogDir = "$env:ProgramData\NOVIVO"
+$Log    = Join-Path $LogDir 'rdp-repair.log'
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+function Write-Log { param([string]$m) ; "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $m" | Add-Content -Path $Log }
+
+function Test-Listener {
+    $c = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($c.Count -eq 0) { return $false }
+    try {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='TermService'" -ErrorAction Stop
+        if ($svc -and $svc.ProcessId) { return [bool]($c | Where-Object { $_.OwningProcess -eq $svc.ProcessId }) }
+    } catch { }
+    return $true
+}
+
+function Update-RdpWrapIni {
+    # A new Windows build needs a matching rdpwrap.ini section. The community
+    # fork is the only one still updated.
+    $ini = "$env:ProgramFiles\RDP Wrapper\rdpwrap.ini"
+    if (-not (Test-Path $ini)) { return $false }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add('User-Agent', 'Mozilla/5.0')
+        $tmp = "$env:TEMP\rdpwrap.ini.new"
+        $wc.DownloadFile('https://raw.githubusercontent.com/sebaxakerhtc/rdpwrap.ini/master/rdpwrap.ini', $tmp)
+        if (-not (Test-Path $tmp) -or (Get-Item $tmp).Length -lt 10KB) { Write-Log 'ini download too small - ignored'; return $false }
+        Copy-Item $tmp $ini -Force
+        Restart-Service TermService -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 8
+        return $true
+    } catch { Write-Log "ini refresh failed: $($_.Exception.Message)"; return $false }
+}
+
+function Invoke-TermSrvPatch {
+    # x64 Win10/11 session-limit check:
+    #   39 81 3C 06 00 00   cmp dword ptr [rcx+63Ch], eax
+    #   0F 84 xx xx xx xx   je  <reject connection>
+    # becomes
+    #   B8 00 01 00 00      mov eax, 100h
+    #   89 81 38 06 00 00   mov dword ptr [rcx+638h], eax
+    #   90                  nop
+    # The signature must occur EXACTLY once. A blind scan that patches every hit
+    # corrupts the DLL, so anything other than one match is a hard refusal.
+    if (-not [Environment]::Is64BitOperatingSystem) { Write-Log 'termsrv patch: 32-bit OS not supported'; return $false }
+    $src = "$env:SystemRoot\System32\termsrv.dll"
+    $bak = "$env:SystemRoot\System32\termsrv.dll.novivo.bak"
+    $sigHex = '39813C0600000F84'
+    $newBytes = [byte[]](0xB8,0x00,0x01,0x00,0x00,0x89,0x81,0x38,0x06,0x00,0x00,0x90)
+
+    try { $bytes = [System.IO.File]::ReadAllBytes($src) }
+    catch { Write-Log "termsrv read failed: $($_.Exception.Message)"; return $false }
+
+    # Hex-string search: a managed scan over ~1 MB is far too slow in PS 5.1.
+    $hex  = [System.BitConverter]::ToString($bytes) -replace '-', ''
+    $hits = @()
+    $pos  = $hex.IndexOf($sigHex)
+    while ($pos -ge 0) {
+        if ($pos % 2 -eq 0) { $hits += ($pos / 2) }   # odd index = not a byte boundary
+        $pos = $hex.IndexOf($sigHex, $pos + 1)
+    }
+    if ($hits.Count -ne 1) {
+        Write-Log "termsrv patch: signature matched $($hits.Count) time(s) - refusing to patch"
+        return $false
+    }
+    $off = $hits[0]
+    Write-Log "termsrv patch: signature at offset 0x$('{0:X}' -f $off)"
+
+    Stop-Service TermService -Force -ErrorAction SilentlyContinue
+    Stop-Service UmRdpService -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 4
+
+    # The signature is only present in an UNPATCHED file, so this backup is
+    # always pristine - including after a Windows Update replaced the DLL.
+    try { Copy-Item $src $bak -Force } catch { Write-Log "backup failed: $($_.Exception.Message)"; return $false }
+
+    & takeown.exe /f $src /a 2>&1 | Out-Null
+    & icacls.exe $src /grant '*S-1-5-32-544:F' 2>&1 | Out-Null
+
+    for ($k = 0; $k -lt $newBytes.Length; $k++) { $bytes[$off + $k] = $newBytes[$k] }
+
+    $written = $false
+    try { [System.IO.File]::WriteAllBytes($src, $bytes); $written = $true }
+    catch {
+        # File still mapped: swap it out under a different name instead.
+        try {
+            $stale = "$src.old"
+            if (Test-Path $stale) { Remove-Item $stale -Force -ErrorAction SilentlyContinue }
+            Rename-Item -Path $src -NewName 'termsrv.dll.old' -Force
+            [System.IO.File]::WriteAllBytes($src, $bytes)
+            $written = $true
+        } catch { Write-Log "termsrv write failed: $($_.Exception.Message)" }
+    }
+    if (-not $written) { return $false }
+
+    & icacls.exe $src /setowner 'NT SERVICE\TrustedInstaller' 2>&1 | Out-Null
+
+    # RDPWrap may have redirected ServiceDll; the patch only takes effect when
+    # TermService loads the real termsrv.dll again.
+    try {
+        Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\services\TermService\Parameters' `
+            -Name 'ServiceDll' -Value '%SystemRoot%\System32\termsrv.dll' -Type ExpandString -Force
+    } catch { }
+
+    Start-Service TermService -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 8
+    if (Test-Listener) { Write-Log 'termsrv patch applied and listener is up'; return $true }
+
+    Write-Log 'termsrv patch did not bring the listener up - rolling back'
+    Stop-Service TermService -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    try { Copy-Item $bak $src -Force } catch { Write-Log "ROLLBACK FAILED: $($_.Exception.Message)" }
+    Start-Service TermService -ErrorAction SilentlyContinue
+    return $false
+}
+
+# ── main ────────────────────────────────────────────────────────────────────
+if (-not $PatchOnly) {
+    Start-Sleep -Seconds 30          # let TermService settle when run at boot
+    if (Test-Listener) { exit 0 }
+    Write-Log "listener down on port $Port - repairing"
+    if (Update-RdpWrapIni) {
+        if (Test-Listener) { Write-Log 'repaired by refreshing rdpwrap.ini'; exit 0 }
+    }
+}
+if (Invoke-TermSrvPatch) { exit 0 }
+Write-Log 'repair exhausted - RDP still down'
+exit 1
+'@
+    $body = $body.Replace('__PORT__', [string]$RdpPort)
+    Set-Content -Path $path -Value $body -Encoding UTF8 -Force
+    return $path
+}
+
+function Enable-NovivoMultiSession {
+    # Home permits a single session. These are the switches RDPWrap and the
+    # termsrv patch rely on to admit concurrent users.
+    $ts = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+    try {
+        Set-ItemProperty -Path $ts -Name 'fSingleSessionPerUser' -Value 0 -Type DWord -Force -ErrorAction Stop
+        Write-Output-Box "[OK] Concurrent sessions enabled (fSingleSessionPerUser=0)"
+    } catch { Write-Output-Box "[INFO] fSingleSessionPerUser: $($_.Exception.Message)" }
+    # 0xFFFFFFFF overflows Int32 in Set-ItemProperty, so go through reg.exe.
+    & reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v MaxInstanceCount /t REG_DWORD /d 4294967295 /f 2>&1 | Out-Null
+    Write-Output-Box "[OK] Session limit raised (MaxInstanceCount unlimited)"
+}
+
+function Register-NovivoRepairTask {
+    # Windows Update replaces termsrv.dll and bumps the build number, silently
+    # killing both RDPWrap (no ini section for the new build) and any patch.
+    param([string]$ScriptPath)
+    $taskName = 'NOVIVO-RDP-AutoRepair'
+    try {
+        schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
+        $ps  = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $cmd = "`"$ps`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
+        & schtasks.exe /Create /TN $taskName /TR $cmd /SC ONSTART /RU SYSTEM /RL HIGHEST /F 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output-Box "[OK] Auto-repair task registered (runs at every boot)"
+        } else {
+            Write-Output-Box "[WARNING] Could not register auto-repair task (schtasks exit $LASTEXITCODE)"
+        }
+    } catch { Write-Output-Box "[WARNING] Auto-repair task: $($_.Exception.Message)" }
+}
+
+function Install-HomeRdpSupport {
+    # Everything Windows Home needs to host RDP, in order, each step verified.
+    param([int]$Port)
+
+    Write-Output-Box ""
+    Write-Output-Box "[HOME] Windows Home detected - installing RDP hosting support..."
+
+    # 1. keep the AV from eating the payload, the patched DLL, or the repair
+    #    script - done first so every path below writes into excluded folders
+    Add-NovivoDefenderExclusion
+
+    $active = Test-RdpWrapActive -Port $Port
+    if ($active.Ok) {
+        Write-Output-Box "[OK] RDP is already listening - skipping RDP Wrapper install"
+        Enable-NovivoMultiSession
+        $sp = New-NovivoRepairScript
+        Register-NovivoRepairTask -ScriptPath $sp
+        return $true
+    }
+
+    # 2. RDP Wrapper + a current ini
+    $rdpwZip = "$env:TEMP\RDPWrap.zip"
+    $rdpwDir = "$env:TEMP\RDPWrapExtract"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        $wc.DownloadFile("https://github.com/stascorp/rdpwrap/releases/download/v1.6.2/RDPWrap-v1.6.2.zip", $rdpwZip)
+        if ((Test-Path $rdpwZip) -and (Get-Item $rdpwZip).Length -gt 100KB) {
+            if (Test-Path $rdpwDir) { Remove-Item $rdpwDir -Recurse -Force }
+            Expand-Archive -Path $rdpwZip -DestinationPath $rdpwDir -Force
+            $inst = Get-ChildItem $rdpwDir -Filter "RDPWInst.exe" -Recurse | Select-Object -First 1
+            if ($inst) {
+                $p = Start-Process -FilePath $inst.FullName -ArgumentList "-i" -Wait -PassThru -WindowStyle Hidden
+                Write-Output-Box "[OK] RDP Wrapper installed (exit code $($p.ExitCode))"
+                try {
+                    $wc2 = New-Object System.Net.WebClient
+                    $wc2.Headers.Add("User-Agent", "Mozilla/5.0")
+                    $wc2.DownloadFile("https://raw.githubusercontent.com/sebaxakerhtc/rdpwrap.ini/master/rdpwrap.ini", "$env:ProgramFiles\RDP Wrapper\rdpwrap.ini")
+                    Write-Output-Box "[OK] rdpwrap.ini updated for the current Windows build"
+                } catch { Write-Output-Box "[INFO] ini update skipped: $($_.Exception.Message)" }
+                Restart-Service -Name "TermService" -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 8
+            } else { Write-Output-Box "[WARNING] RDPWInst.exe not found inside the archive" }
+        } else { Write-Output-Box "[WARNING] RDP Wrapper download failed or the file is too small" }
+    } catch { Write-Output-Box "[WARNING] RDP Wrapper install failed: $($_.Exception.Message)" }
+
+    # 3. did it actually work? this is the check the old code never made
+    $active = Test-RdpWrapActive -Port $Port
+    if ($active.WrapperLoaded) { Write-Output-Box "[OK] rdpwrap.dll is loaded into TermService" }
+    else { Write-Output-Box "[WARNING] rdpwrap.dll is NOT loaded into TermService" }
+
+    $ok = $active.Ok
+    if ($ok) {
+        Write-Output-Box "[OK] RDP listener verified on port $Port"
+    } else {
+        # 4. fallback: patch termsrv.dll directly
+        Write-Output-Box "[WARNING] RDP Wrapper is installed but RDP is still not listening."
+        Write-Output-Box "[INFO] This build most likely has no section in rdpwrap.ini."
+        Write-Output-Box "[INFO] Falling back to patching termsrv.dll (backup + auto-rollback)..."
+        $sp = New-NovivoRepairScript
+        try {
+            $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $pp = Start-Process -FilePath $ps -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","`"$sp`"","-PatchOnly","-Port",$Port -Wait -PassThru -WindowStyle Hidden
+            $ok = ($pp.ExitCode -eq 0)
+        } catch { Write-Output-Box "[WARNING] termsrv patch failed to run: $($_.Exception.Message)" }
+        if ($ok) {
+            Write-Output-Box "[OK] termsrv.dll patched - RDP listener is up"
+        } else {
+            Write-Output-Box "[WARNING] termsrv.dll patch did not help (see $env:ProgramData\NOVIVO\rdp-repair.log)"
+            Write-Output-Box "[WARNING] Could not auto-enable RDP hosting on Windows Home"
+            Write-Output-Box "[INFO] Options: upgrade to Windows Pro, or use Chrome Remote Desktop"
+        }
+    }
+
+    # 5 + 6. concurrent sessions, and survive the next Windows Update
+    Enable-NovivoMultiSession
+    $sp2 = New-NovivoRepairScript
+    Register-NovivoRepairTask -ScriptPath $sp2
+
+    return $ok
+}
+
+# Dry run: report what this Windows supports and change nothing.
+if ($PreflightOnly) {
+    $osi = Get-NovivoOSInfo
+    $supported = Test-NovivoOSSupport -Method $Method -OSInfo $osi
+    Write-Output-Box ""
+    if ($supported) { Write-Output-Box "[RESULT] Supported - setup would continue." ; exit 0 }
+    Write-Output-Box "[RESULT] Not supported - setup would stop here."
+    exit 2
+}
+
+# NetworkKey/UsersJson are validated below rather than declared Mandatory: a
+# missing Mandatory parameter makes powershell.exe block on a console prompt
+# that a GUI-spawned process can never answer.
+$userList = @()
+if (-not [string]::IsNullOrWhiteSpace($UsersJson)) { $userList = @($UsersJson | ConvertFrom-Json) }
 $networkID = $NetworkKey
 $rdpWorking = $false
+
+# ── Preflight: can this Windows host the selected method at all? ────────────
+# Runs before anything with a side effect, so an unsupported machine is left
+# exactly as it was found.
+$osInfo = Get-NovivoOSInfo
+if (-not (Test-NovivoOSSupport -Method $Method -OSInfo $osInfo)) {
+    Write-Output-Box ""
+    Write-Output-Box "[INFO] Setup stopped - no changes were made to this computer."
+    exit 2
+}
 
 # ── Disable sleep & hibernate during installation ───────────────────────────
 $_powerLoaded = $false
@@ -434,50 +859,15 @@ try {
                 if ($wmicOut -match 'ReturnValue = 0') { Write-Output-Box "[OK] RDP enabled via wmic" }
             } catch {}
 
-            # Detect Windows edition  -  Home needs RDP Wrapper to enable hosting
+            # Windows Home ships no RDP host - install the support stack and
+            # verify it actually took (see Install-HomeRdpSupport).
             try {
-                $tsWinEdition = (Get-WmiObject Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption
-                if ($tsWinEdition -match '\bHome\b') {
-                    Write-Output-Box ""
-                    Write-Output-Box "[INFO] Windows Home detected - installing RDP Wrapper to enable RDP..."
-                    $rdpwZip  = "$env:TEMP\RDPWrap.zip"
-                    $rdpwDir  = "$env:TEMP\RDPWrapExtract"
-                    $rdpwOk   = $false
-                    try {
-                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                        $wc2 = New-Object System.Net.WebClient
-                        $wc2.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                        $wc2.DownloadFile("https://github.com/stascorp/rdpwrap/releases/download/v1.6.2/RDPWrap-v1.6.2.zip", $rdpwZip)
-                        if ((Test-Path $rdpwZip) -and (Get-Item $rdpwZip).Length -gt 100KB) {
-                            if (Test-Path $rdpwDir) { Remove-Item $rdpwDir -Recurse -Force }
-                            Expand-Archive -Path $rdpwZip -DestinationPath $rdpwDir -Force
-                            $rdpwInst = Get-ChildItem $rdpwDir -Filter "RDPWInst.exe" -Recurse | Select-Object -First 1
-                            if ($rdpwInst) {
-                                $rdpwProc = Start-Process -FilePath $rdpwInst.FullName -ArgumentList "-i" -Wait -PassThru -WindowStyle Hidden
-                                Write-Output-Box "[OK] RDP Wrapper installed (code $($rdpwProc.ExitCode))"
-                                $rdpwOk = $true
-                                # Update ini file for newer Win10/11 builds (community-maintained)
-                                $rdpwIniPath = "$env:ProgramFiles\RDP Wrapper\rdpwrap.ini"
-                                try {
-                                    $wc3 = New-Object System.Net.WebClient
-                                    $wc3.Headers.Add("User-Agent", "Mozilla/5.0")
-                                    $wc3.DownloadFile("https://raw.githubusercontent.com/sebaxakerhtc/rdpwrap.ini/master/rdpwrap.ini", $rdpwIniPath)
-                                    Write-Output-Box "[OK] RDP Wrapper ini updated for current Windows build"
-                                } catch { Write-Output-Box "[INFO] ini update skipped: $($_.Exception.Message)" }
-                                Start-Sleep -Seconds 2
-                                Restart-Service -Name "RDPWrapper" -ErrorAction SilentlyContinue
-                                Write-Output-Box "[OK] RDP Wrapper service started"
-                            } else { Write-Output-Box "[WARNING] RDPWInst.exe not found in archive" }
-                        } else { Write-Output-Box "[WARNING] RDP Wrapper download failed or file too small" }
-                    } catch { Write-Output-Box "[WARNING] RDP Wrapper install failed: $($_.Exception.Message)" }
-                    if (-not $rdpwOk) {
-                        Write-Output-Box "[WARNING] Could not auto-enable RDP on Windows Home"
-                        Write-Output-Box "[INFO] Manual option: upgrade to Windows Pro, or use Chrome Remote Desktop"
-                    }
+                if ($osInfo.IsHome) {
+                    [void](Install-HomeRdpSupport -Port $RdpPort)
                 } else {
-                    Write-Output-Box "[INFO] Windows edition: $tsWinEdition"
+                    Write-Output-Box "[INFO] Windows edition: $($osInfo.Caption) - native RDP host available"
                 }
-            } catch {}
+            } catch { Write-Output-Box "[WARNING] Home RDP support: $($_.Exception.Message)" }
 
             # TS-STEP 5: Configure user accounts
             Write-Output-Box ""
@@ -1059,50 +1449,16 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             }
         } catch { Write-Output-Box "[INFO] WMI enable: $($_.Exception.Message)" }
 
-        # Detect Windows edition  -  Home needs RDP Wrapper
+        # Windows Home ships no RDP host - install the support stack and verify
+        # it actually took (see Install-HomeRdpSupport).
         try {
-            $winEdition = (Get-WmiObject Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption
-            if ($winEdition -match '\bHome\b') {
-                Write-Output-Box ""
-                Write-Output-Box "[INFO] Windows Home detected - installing RDP Wrapper to enable RDP..."
-                $rdpwZip2  = "$env:TEMP\RDPWrap2.zip"
-                $rdpwDir2  = "$env:TEMP\RDPWrapExtract2"
-                $rdpwOk2   = $false
-                try {
-                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                    $wc4 = New-Object System.Net.WebClient
-                    $wc4.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    $wc4.DownloadFile("https://github.com/stascorp/rdpwrap/releases/download/v1.6.2/RDPWrap-v1.6.2.zip", $rdpwZip2)
-                    if ((Test-Path $rdpwZip2) -and (Get-Item $rdpwZip2).Length -gt 100KB) {
-                        if (Test-Path $rdpwDir2) { Remove-Item $rdpwDir2 -Recurse -Force }
-                        Expand-Archive -Path $rdpwZip2 -DestinationPath $rdpwDir2 -Force
-                        $rdpwInst2 = Get-ChildItem $rdpwDir2 -Filter "RDPWInst.exe" -Recurse | Select-Object -First 1
-                        if ($rdpwInst2) {
-                            $rdpwProc2 = Start-Process -FilePath $rdpwInst2.FullName -ArgumentList "-i" -Wait -PassThru -WindowStyle Hidden
-                            Write-Output-Box "[OK] RDP Wrapper installed (code $($rdpwProc2.ExitCode))"
-                            $rdpwOk2 = $true
-                            $rdpwIniPath2 = "$env:ProgramFiles\RDP Wrapper\rdpwrap.ini"
-                            try {
-                                $wc5 = New-Object System.Net.WebClient
-                                $wc5.Headers.Add("User-Agent", "Mozilla/5.0")
-                                $wc5.DownloadFile("https://raw.githubusercontent.com/sebaxakerhtc/rdpwrap.ini/master/rdpwrap.ini", $rdpwIniPath2)
-                                Write-Output-Box "[OK] RDP Wrapper ini updated for current Windows build"
-                            } catch { Write-Output-Box "[INFO] ini update skipped: $($_.Exception.Message)" }
-                            Start-Sleep -Seconds 2
-                            Restart-Service -Name "RDPWrapper" -ErrorAction SilentlyContinue
-                            Write-Output-Box "[OK] RDP Wrapper service started"
-                        } else { Write-Output-Box "[WARNING] RDPWInst.exe not found in archive" }
-                    } else { Write-Output-Box "[WARNING] RDP Wrapper download failed or file too small" }
-                } catch { Write-Output-Box "[WARNING] RDP Wrapper install failed: $($_.Exception.Message)" }
-                if (-not $rdpwOk2) {
-                    Write-Output-Box "[WARNING] Could not auto-enable RDP on Windows Home"
-                    Write-Output-Box "[INFO] Manual option: upgrade to Windows Pro, or use Chrome Remote Desktop"
-                }
+            if ($osInfo.IsHome) {
+                [void](Install-HomeRdpSupport -Port $RdpPort)
             } else {
-                Write-Output-Box "[INFO] Windows edition: $winEdition"
+                Write-Output-Box "[INFO] Windows edition: $($osInfo.Caption) - native RDP host available"
             }
-        } catch {}
-        
+        } catch { Write-Output-Box "[WARNING] Home RDP support: $($_.Exception.Message)" }
+
         # Configure user accounts
         Write-Output-Box ""
         Write-Output-Box "[5b/7] Configuring $($userList.Count) user account(s)..."

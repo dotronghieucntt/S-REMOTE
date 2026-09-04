@@ -89,6 +89,7 @@ C = {
     "log_fg":     "#00D77D",   # log text  (green)
     "status_bg":  "#080A16",   # status bar
     "btn_dim":    "#1E2444",   # dim button
+    "btn_hov":    "#1A2040",   # hover tint for outlined buttons
     "header_bg":  "#0A0C1C",   # top header strip
 }
 
@@ -105,6 +106,35 @@ FONT_SMALL   = ("Segoe UI", 8)
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+def _bind_mousewheel(canvas):
+    """Wheel-scroll a canvas while the pointer is over it."""
+    def _scroll(e):
+        canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+    canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _scroll))
+    canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+
+class ScrollFrame(tk.Frame):
+    """Vertically scrollable container. Pack content into `.body`."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, bg=C["panel"], **kw)
+        self._canvas = tk.Canvas(self, bg=C["panel"], highlightthickness=0)
+        self._sbar = ttk.Scrollbar(self, orient="vertical",
+                                   command=self._canvas.yview,
+                                   style="Dark.Vertical.TScrollbar")
+        self._canvas.configure(yscrollcommand=self._sbar.set)
+        self._sbar.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self.body = tk.Frame(self._canvas, bg=C["panel"])
+        self._win = self._canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.body.bind("<Configure>", lambda e: self._canvas.configure(
+            scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind("<Configure>", lambda e:
+            self._canvas.itemconfig(self._win, width=e.width))
+        _bind_mousewheel(self._canvas)
+
+
 def random_password(length=12):
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
     return "".join(random.choice(chars) for _ in range(length))
@@ -128,22 +158,9 @@ class ServerList(tk.Frame):
         self._active_idx = tk.IntVar(value=0)
         self._vpn_var = vpn_method_var
         self._build_header()
-        # Scrollable canvas
-        wrap = tk.Frame(self, bg=C["panel"])
-        wrap.pack(fill="x")
-        self._canvas = tk.Canvas(wrap, bg=C["panel"], highlightthickness=0, height=110)
-        self._sbar   = ttk.Scrollbar(wrap, orient="vertical",
-                                    command=self._canvas.yview,
-                                    style="Dark.Vertical.TScrollbar")
-        self._canvas.configure(yscrollcommand=self._sbar.set)
-        self._sbar.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
-        self._inner = tk.Frame(self._canvas, bg=C["panel"])
-        self._cwin  = self._canvas.create_window((0, 0), window=self._inner, anchor="nw")
-        self._inner.bind("<Configure>", lambda e: self._canvas.configure(
-            scrollregion=self._canvas.bbox("all")))
-        self._canvas.bind("<Configure>", lambda e:
-            self._canvas.itemconfig(self._cwin, width=e.width))
+        # Rows grow the frame; the surrounding ScrollFrame scrolls if needed.
+        self._inner = tk.Frame(self, bg=C["panel"])
+        self._inner.pack(fill="x")
 
     def _build_header(self):
         hdr = tk.Frame(self, bg=C["grid_head"], height=26)
@@ -298,8 +315,9 @@ class UserTable(tk.Frame):
         self._show_pass = False
         self._rows: list[dict] = []   # [{user, pass, vars…}]
         self._build_header()
+        # Rows grow the frame; the surrounding ScrollFrame scrolls if needed.
         self._scroll_frame = tk.Frame(self, bg=C["panel"])
-        self._scroll_frame.pack(fill="both", expand=True)
+        self._scroll_frame.pack(fill="x")
 
     def _build_header(self):
         hdr = tk.Frame(self, bg=C["grid_head"], height=28)
@@ -484,8 +502,31 @@ class NovivoCTkApp(ctk.CTk):
         self._build_header()
         self._build_body()
         self._build_statusbar()
+        self._show_briefing()
         # Auto-save servers on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _show_briefing(self):
+        """The log pane is empty until a run starts - use it to say plainly what
+        START SETUP is going to do to this machine."""
+        for line in (
+            "=== NOVIVO REMOTE DESKTOP SETUP ===",
+            "",
+            "Pressing START SETUP changes THIS computer:",
+            "",
+            "[INFO] 1. Installs and connects the selected VPN (Tailscale / ZeroTier)",
+            "[INFO] 2. Creates or updates the Windows accounts listed on the left",
+            "[INFO]    and adds every one of them to the Administrators group",
+            "[INFO] 3. Enables Remote Desktop, opens the firewall on the RDP port",
+            "[INFO] 4. Disables Network Level Authentication (NLA)",
+            "[INFO] 5. Blocks sleep, and turns hibernate off permanently",
+            "[WARNING] 6. If the RDP listener will not start, this machine RESTARTS",
+            "[WARNING]    automatically 30 seconds after setup finishes.",
+            "[INFO]    A pending restart can be cancelled with:  shutdown /a",
+            "",
+            "--- The installation log replaces this text when setup begins ---",
+        ):
+            self._log_write(line)
 
     # ── Scrollbar style ──────────────────────────────────────────────────────
     def _setup_scrollbar_style(self):
@@ -549,21 +590,42 @@ class NovivoCTkApp(ctk.CTk):
     def _build_body(self):
         body = tk.Frame(self, bg=C["bg"])
         body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=0, minsize=460)
-        body.columnconfigure(1, weight=1)
+        # Both columns grow with the window. Previously column 0 was pinned at
+        # 460px, so every pixel gained by resizing went to the empty log pane.
+        body.columnconfigure(0, weight=2, minsize=460)
+        body.columnconfigure(1, weight=0)
+        body.columnconfigure(2, weight=3)
         body.rowconfigure(0, weight=1)
 
         self._build_left(body)
-        # divider
-        tk.Frame(body, bg=C["border"], width=1).grid(row=0, column=0,
-                                                       sticky="ns", padx=(460, 0))
+        tk.Frame(body, bg=C["border"], width=1).grid(row=0, column=1, sticky="ns")
         self._build_right(body)
 
     # ── Left Config Panel ─────────────────────────────────────────────────────
     def _build_left(self, parent):
-        left = tk.Frame(parent, bg=C["panel"], width=460)
+        left = tk.Frame(parent, bg=C["panel"])
         left.grid(row=0, column=0, sticky="nsew")
-        left.pack_propagate(False)
+
+        # Packed FIRST and against the bottom edge, so a growing user table can
+        # never push the primary action off-screen the way it used to.
+        self._btn_start = ctk.CTkButton(
+            left,
+            text="▶  START SETUP",
+            command=self._start_install,
+            fg_color=C["accent"],
+            hover_color=C["accent_hov"],
+            text_color="white",
+            corner_radius=6,
+            font=FONT_BTN_LG,
+            height=48)
+        self._btn_start.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
+        tk.Frame(left, bg=C["border"], height=1).pack(side="bottom", fill="x",
+                                                      pady=(10, 12))
+
+        # Everything above the button scrolls, so no control is ever clipped.
+        scroller = ScrollFrame(left)
+        scroller.pack(fill="both", expand=True)
+        left = scroller.body
 
         # ── VPN METHOD ───────────────────────────────────────────────────────
         self._section_header(left, "VPN METHOD", C["accent"])
@@ -589,10 +651,12 @@ class NovivoCTkApp(ctk.CTk):
         # Server action buttons
         srv_btns = tk.Frame(left, bg=C["panel"])
         srv_btns.pack(fill="x", padx=14, pady=(6, 0))
-        self._flat_btn(srv_btns, "+ Add Server",  C["warn"],    self._add_server,      w=120).pack(side="left", padx=(0, 4))
-        self._flat_btn(srv_btns, "- Remove",       C["danger"],  self._remove_server,   w=100).pack(side="left", padx=(0, 4))
-        self._flat_btn(srv_btns, "★ Set Default",  C["purple"],  self._set_default_srv, w=120).pack(side="left", padx=(0, 4))
-        self._flat_btn(srv_btns, "💾 Save",          C["success"], self._save_servers,    w=90 ).pack(side="left")
+        self._flat_btn(srv_btns, "+ Add Server",    C["warn"],    self._add_server,      w=110).pack(side="left", padx=(0, 4))
+        self._flat_btn(srv_btns, "- Remove Server", C["danger"],  self._remove_server,   w=130).pack(side="left", padx=(0, 4))
+        # Renamed: the radio button already says which server is active - this
+        # button only reorders the list, so it should say so.
+        self._flat_btn(srv_btns, "↑ To Top",        C["purple"],  self._set_default_srv, w=85 ).pack(side="left", padx=(0, 4))
+        self._flat_btn(srv_btns, "Save",            C["success"], self._save_servers,    w=75 ).pack(side="left")
 
         # Dynamic VPN mode hint
         self._vpn_hint = tk.Label(
@@ -600,9 +664,14 @@ class NovivoCTkApp(ctk.CTk):
             bg=C["panel"], fg=C["text_lo"], font=("Segoe UI", 8), anchor="w", padx=18)
         self._vpn_hint.pack(fill="x", pady=(2, 0))
 
-        # RDP port row
+        tk.Frame(left, bg=C["border"], height=1).pack(fill="x", pady=8)
+
+        # ── REMOTE DESKTOP ───────────────────────────────────────────────────
+        self._section_header(left, "REMOTE DESKTOP ACCESS", C["success"])
+
+        # The port configures RDP, not the VPN server list it used to sit under.
         port_row = tk.Frame(left, bg=C["panel"])
-        port_row.pack(fill="x", padx=14, pady=(4, 0))
+        port_row.pack(fill="x", padx=14, pady=(6, 0))
         tk.Label(port_row, text="RDP PORT:", bg=C["panel"], fg=C["text_lo"],
                  font=FONT_LABELB).pack(side="left")
         self._rdp_port = tk.Entry(port_row, bg=C["input_bg"], fg=C["text_hi"],
@@ -613,54 +682,34 @@ class NovivoCTkApp(ctk.CTk):
         tk.Label(port_row, text="(default 3389 — change if blocked)",
                  bg=C["panel"], fg=C["text_lo"], font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
 
-        tk.Frame(left, bg=C["border"], height=1).pack(fill="x", pady=8)
-
-        self._section_header(left, "USERS & CREDENTIALS  (RDP)", C["success"])
-
         self._table = UserTable(left)
-        self._table.pack(fill="x", padx=14, pady=(6, 0))
+        self._table.pack(fill="x", padx=14, pady=(8, 0))
         self._table.add_row(os.environ.get("USERNAME", ""), "")
 
-        # action buttons row 1
-        btn_row1 = tk.Frame(left, bg=C["panel"])
-        btn_row1.pack(fill="x", padx=14, pady=(8, 0))
-        self._flat_btn(btn_row1, "+ Add User",    C["accent"],   self._add_user,   w=100).pack(side="left", padx=(0, 4))
-        self._flat_btn(btn_row1, "- Remove",      C["danger"],   self._rem_user,   w=100).pack(side="left", padx=(0, 4))
-        self._flat_btn(btn_row1, "Random Pwd",    C["success"],  self._rand_pass,  w=110).pack(side="left", padx=(0, 4))
-        self._flat_btn(btn_row1, "Clear All",     C["btn_dim"],  self._clear_pass, w=100).pack(side="left")
-
-        # action buttons row 2
-        btn_row2 = tk.Frame(left, bg=C["panel"])
-        btn_row2.pack(fill="x", padx=14, pady=(6, 0))
-
+        # The toggle sits directly under the table it controls
+        chk_row = tk.Frame(left, bg=C["panel"])
+        chk_row.pack(fill="x", padx=14, pady=(4, 0))
         self._chk_show = ctk.CTkCheckBox(
-            btn_row2, text="Show Passwords",
+            chk_row, text="Show passwords",
             variable=tk.BooleanVar(value=False),
             command=self._toggle_show_pass,
             text_color=C["text_lo"],
             fg_color=C["accent"],
             font=("Segoe UI", 9))
-        self._chk_show.pack(side="right")
+        self._chk_show.pack(side="left")
 
-        # ── START SETUP ───────────────────────────────────────────────────────
-        tk.Frame(left, bg=C["border"], height=1).pack(fill="x", pady=12)
-
-        self._btn_start = ctk.CTkButton(
-            left,
-            text="▶  START SETUP",
-            command=self._start_install,
-            fg_color=C["accent"],
-            hover_color=C["accent_hov"],
-            text_color="white",
-            corner_radius=6,
-            font=FONT_BTN_LG,
-            height=48)
-        self._btn_start.pack(fill="x", padx=14, pady=(0, 14))
+        btn_row1 = tk.Frame(left, bg=C["panel"])
+        btn_row1.pack(fill="x", padx=14, pady=(8, 0))
+        self._flat_btn(btn_row1, "+ Add User",    C["accent"],   self._add_user,   w=100).pack(side="left", padx=(0, 4))
+        self._flat_btn(btn_row1, "- Remove User", C["danger"],   self._rem_user,   w=115).pack(side="left", padx=(0, 4))
+        self._flat_btn(btn_row1, "Random Pwd",    C["success"],  self._rand_pass,  w=105).pack(side="left", padx=(0, 4))
+        self._flat_btn(btn_row1, "Clear All",     C["text_lo"],  self._clear_pass, w=90 ).pack(side="left")
+        tk.Frame(left, bg=C["panel"], height=10).pack(fill="x")
 
     # ── Right Log Panel ────────────────────────────────────────────────────────
     def _build_right(self, parent):
         right = tk.Frame(parent, bg=C["log_bg"])
-        right.grid(row=0, column=1, sticky="nsew")
+        right.grid(row=0, column=2, sticky="nsew")
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
 
@@ -748,10 +797,14 @@ class NovivoCTkApp(ctk.CTk):
                  font=FONT_TITLE, padx=10).pack(side="left")
 
     def _flat_btn(self, parent, text, color, cmd, w=None, h=30):
+        """Secondary action: outlined, so START SETUP is the only solid button
+        on screen and reads as the primary action."""
         kw = dict(width=w) if w else {}
         b = ctk.CTkButton(parent, text=text, command=cmd,
-                          fg_color=color, hover_color=color,
-                          text_color="white", corner_radius=4,
+                          fg_color="transparent", bg_color=parent.cget("bg"),
+                          border_width=1, border_color=color,
+                          hover_color=C["btn_hov"],
+                          text_color=color, corner_radius=4,
                           font=FONT_BTN, height=h, **kw)
         return b
 
@@ -763,7 +816,9 @@ class NovivoCTkApp(ctk.CTk):
             hover_color=C["accent_hov"],
             text_color="white",
             command=lambda v=value: self._select_vpn(v))
-        btn.pack(side=side, padx=(0, 4) if side == "left" else (4, 0))
+        # fill/expand so the pair splits the panel evenly at any window width
+        btn.pack(side=side, fill="x", expand=True,
+                 padx=(0, 4) if side == "left" else (4, 0))
         return btn
 
     def _refresh_vpn_buttons(self):
@@ -882,7 +937,7 @@ class NovivoCTkApp(ctk.CTk):
         self.clipboard_append(text)
         self._btn_copy.configure(text="✓ COPIED!", fg_color=C["success"])
         self.after(1600, lambda: self._btn_copy.configure(
-            text="COPY LOG", fg_color=C["btn_dim"]))
+            text="COPY LOG", fg_color="transparent"))
 
     def _set_status(self, text):
         self._lbl_status.config(text=text)
@@ -930,6 +985,27 @@ class NovivoCTkApp(ctk.CTk):
         rdp_port = self._rdp_port.get().strip()
         if not rdp_port.isdigit() or not (1 <= int(rdp_port) <= 65535):
             messagebox.showerror("Validation", "RDP port must be a number between 1 and 65535.")
+            return
+
+        if not messagebox.askokcancel(
+                "Confirm setup",
+                # short lines - the message box re-wraps anything longer
+                "This will modify THIS computer (%s).\n\n"
+                "VPN method :  %s\n"
+                "RDP port   :  %s\n"
+                "Accounts   :  %s\n\n"
+                "The accounts above are created or updated\n"
+                "and added to local Administrators.\n"
+                "Remote Desktop is enabled, firewall opened.\n"
+                "NLA is disabled.\n"
+                "Hibernate is turned off permanently.\n"
+                "If the RDP listener will not start, this\n"
+                "machine restarts itself 30s after setup.\n\n"
+                "Continue?" % (
+                    os.environ.get("COMPUTERNAME", "this machine"),
+                    method, rdp_port,
+                    ", ".join(u["Username"] for u in users)),
+                icon="warning", default=messagebox.CANCEL):
             return
 
         self._install_running = True
