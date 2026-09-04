@@ -49,7 +49,7 @@ Tool sẽ TỰ ĐỘNG thực hiện TẤT CẢ các bước sau:
    - Cho phép quyền Administrator khi được hỏi
 
 ### Bước 2: Nhập Thông Tin
-   - Network ID: 743993800f9dac1e (đã điền sẵn)
+   - Network ID: network ID của bạn (lấy tại https://my.zerotier.com)
    - Username: (mặc định là user hiện tại)
    - Password: Nhập hoặc bấm "Tạo Password Ngẫu Nhiên"
 
@@ -59,7 +59,7 @@ Tool sẽ TỰ ĐỘNG thực hiện TẤT CẢ các bước sau:
 
 ### Bước 4: Authorize trên ZeroTier Central
    - Vào https://my.zerotier.com
-   - Vào Network: 743993800f9dac1e
+   - Vào network của bạn
    - Tìm thiết bị mới join
    - CHECK vào ô "Auth?" để authorize
 

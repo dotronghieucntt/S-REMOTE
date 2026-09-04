@@ -47,7 +47,7 @@ $form.Controls.Add($labelNetworkID)
 $textNetworkID = New-Object System.Windows.Forms.TextBox
 $textNetworkID.Location = New-Object System.Drawing.Point(($marginLeft + $labelWidth), $currentY)
 $textNetworkID.Size = New-Object System.Drawing.Size($inputWidth, 23)
-$textNetworkID.Text = "743993800f9dac1e"
+$textNetworkID.Text = ""
 $textNetworkID.Font = New-Object System.Drawing.Font("Consolas", 10)
 $form.Controls.Add($textNetworkID)
 $currentY += $rowHeight

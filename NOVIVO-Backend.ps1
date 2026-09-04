@@ -1,17 +1,44 @@
-# NOVIVO-Backend.ps1 - Install logic only
+﻿# NOVIVO-Backend.ps1 - Install logic only
 param([Parameter(Mandatory)][string]$Method,[Parameter(Mandatory)][string]$NetworkKey,[Parameter(Mandatory)][string]$UsersJson,[int]$RdpPort = 3389)
 
 function Write-Output-Box { param([string]$Message,[string]$Color="Lime"); Write-Host $Message; [Console]::Out.Flush() }
 
 function Test-RDPPort {
     param([string]$IPAddress, [int]$Port = 3389, [int]$TimeoutSeconds = 3)
+    $tcp = $null
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $ar = $tcp.BeginConnect($IPAddress, $Port, $null, $null)
-        $ok = $ar.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000, $false)
+        # WaitOne() is signalled for a REFUSED connection too, so it alone proves
+        # nothing. EndConnect() throws unless the handshake actually completed.
+        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000, $false)) {
+            try { $tcp.Close() } catch {}
+            return $false
+        }
+        $tcp.EndConnect($ar)
+        $connected = $tcp.Connected
         try { $tcp.Close() } catch {}
-        return $ok
-    } catch { return $false }
+        return $connected
+    } catch {
+        if ($tcp) { try { $tcp.Close() } catch {} }
+        return $false
+    }
+}
+
+function Test-RdpListener {
+    # Is the RDP listener REALLY up? A bare port check is also satisfied by an
+    # unrelated process squatting the port - often the very reason TermService
+    # could not bind it - so attribute the socket to TermService when possible.
+    param([int]$Port)
+    $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($conns.Count -eq 0) { return $false }
+    try {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='TermService'" -ErrorAction Stop
+        if ($svc -and $svc.ProcessId) {
+            return [bool]($conns | Where-Object { $_.OwningProcess -eq $svc.ProcessId })
+        }
+    } catch { }
+    return $true      # owner could not be determined - accept "something is listening"
 }
 
 $userList = $UsersJson | ConvertFrom-Json
@@ -34,7 +61,7 @@ if ($_powerLoaded) {
     [void][Win32.NovivoPower]::SetThreadExecutionState([uint32]2147483648 -bor [uint32]1 -bor [uint32]64)
 }
 powercfg /hibernate off 2>$null | Out-Null
-Write-Output-Box "[INFO] Sleep and hibernate disabled for duration of setup"
+Write-Output-Box "[INFO] Sleep blocked during setup; hibernate turned off permanently (an RDP host must stay reachable)"
 
 try {
     $rdpWorking = $false
@@ -105,7 +132,8 @@ try {
             }
             if (-not $tsInstalledViaWinget -and -not $tsAlreadyInstalled) {
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
-                [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                # Certificate validation stays ON: this downloads an installer that is
+                # then run with admin rights, so an unverified peer is a code-exec hole.
 
                 $tsUrls = @(
                     "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
@@ -154,8 +182,6 @@ try {
                         catch { Write-Output-Box "Fallback failed: $($_.Exception.Message)" }
                     }
                 }
-
-                [Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 
                 if (-not $tsDownloaded) {
                     Write-Output-Box "[ERROR] Could not download Tailscale. Check internet connection."
@@ -310,7 +336,13 @@ try {
                     Write-Output-Box '[INFO] No auth key - browser login may open'
                 }
                 $tsUpOut = & $tsCliPath $tsUpArgs 2>&1 | Out-String
-                Write-Output-Box '[OK] tailscale up --unattended executed (auto-reconnect on reboot enabled)'
+                if ($LASTEXITCODE -ne 0 -or $tsUpOut -match 'invalid key|expired|unauthorized|failed|error') {
+                    Write-Output-Box "[ERROR] tailscale up did NOT succeed (exit code $LASTEXITCODE)"
+                    Write-Output-Box "[INFO] The auth key is most likely expired, already used or revoked."
+                    Write-Output-Box "[INFO] Generate a new one: https://login.tailscale.com/admin/settings/keys"
+                } else {
+                    Write-Output-Box '[OK] tailscale up --unattended executed (auto-reconnect on reboot enabled)'
+                }
                 if ($tsUpOut -and $tsUpOut.Trim()) { Write-Output-Box "Out: $($tsUpOut.Trim())" }
                 Start-Sleep -Seconds 5
                 # Show Tailscale connection status
@@ -379,10 +411,11 @@ try {
                 $tsWmiTS = Get-WmiObject -Class Win32_TerminalServiceSetting -Namespace root/cimv2/TerminalServices -ErrorAction SilentlyContinue
                 if ($tsWmiTS) {
                     $wmiOk = $false
-                    # Try WMI (1), (1,0), (1,1) in order
-                    foreach ($args_ in @(,1, @(1,0), @(1,1))) {
-                        try { $tsWmiTS.SetAllowTSConnections($args_) | Out-Null; $wmiOk = $true; break } catch {}
-                    }
+                    # PowerShell does NOT splat an array into method parameters, so each
+                    # argument list has to be written out literally on its own call.
+                    try { $tsWmiTS.SetAllowTSConnections(1) | Out-Null;    $wmiOk = $true } catch {}
+                    if (-not $wmiOk) { try { $tsWmiTS.SetAllowTSConnections(1, 1) | Out-Null; $wmiOk = $true } catch {} }
+                    if (-not $wmiOk) { try { $tsWmiTS.SetAllowTSConnections(1, 0) | Out-Null; $wmiOk = $true } catch {} }
                     if ($wmiOk) { Write-Output-Box "[OK] RDP enabled via WMI (AllowTSConnections)" }
                     else { Write-Output-Box "[INFO] WMI SetAllowTSConnections: all args failed - trying CIM..." }
                 }
@@ -765,8 +798,16 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                     Write-Output-Box "[WARNING] RDP port $RdpPort is NOT listening on this machine"
                     Write-Output-Box "[INFO] A machine restart is required for RDP listener to start"
                 }
-                # Sync working status
-                if ($tsRdpReady) { $tsRdpWorking = $true }
+                if ($tsRdpReady) { Write-Output-Box "[INFO] RDP reachable via Tailscale" }
+            }
+
+            # Authoritative status: the summary must reflect the real listener state,
+            # never an earlier optimistic flag. Runs even when no Tailscale IP was found.
+            $tsRdpWorking = Test-RdpListener -Port $RdpPort
+            if ($tsRdpWorking -and $tsNeedsAutoRestart) {
+                # Listener bound late - the reboot is no longer needed.
+                Write-Output-Box "[OK] Port $RdpPort bound before finishing - restart cancelled"
+                $tsNeedsAutoRestart = $false
             }
 
             # Final summary – Tailscale
@@ -800,6 +841,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             if ($tsNeedsAutoRestart) {
                 Write-Output-Box ""
                 Write-Output-Box "!!! AUTO-RESTART IN 30 SECONDS !!!"
+                Write-Output-Box "[INFO] To cancel the restart, run in a terminal:  shutdown /a"
                 Write-Output-Box "[INFO] RDP listener cannot start on this Windows edition without a clean boot"
                 Write-Output-Box "[INFO] Everything is configured. After restart Tailscale will reconnect automatically."
                 Write-Output-Box "[INFO] Wait ~2-3 minutes after restart, then connect: mstsc /v:${tsIP}:${RdpPort}"
@@ -834,7 +876,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
         
         # Enable all TLS protocols for maximum compatibility
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
-        [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        # Certificate validation stays ON - see the Tailscale branch for why.
         
         $downloadSuccess = $false
         $downloadUrls = @(
@@ -876,11 +918,11 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             }
         }
         
-        # Reset certificate validation
-        [Net.ServicePointManager]::ServerCertificateValidationCallback = $null
-        
         if (-not $downloadSuccess) {
-            Write-Output-Box "[ERROR] All download methods failed. Check your internet connection."
+            Write-Output-Box "[ERROR] All download methods failed."
+            Write-Output-Box "[INFO] Check the internet connection. If this network inspects TLS traffic,"
+            Write-Output-Box "[INFO] its root certificate must be trusted by Windows, or install ZeroTier manually"
+            Write-Output-Box "[INFO] from https://www.zerotier.com/download/ and run this setup again."
             return
         }
         
@@ -946,7 +988,12 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
         Write-Output-Box "[4/7] Joining ZeroTier network: $networkID"
         try {
             $joinResult = & $ztCliPath "-q" "join" $networkID 2>&1 | Out-String
-            Write-Output-Box "[OK] Join command executed: $joinResult"
+            if ($LASTEXITCODE -ne 0 -or $joinResult -match 'error|invalid|failed') {
+                Write-Output-Box "[ERROR] Join did NOT succeed (exit code $LASTEXITCODE): $($joinResult.Trim())"
+                Write-Output-Box "[INFO] Check the Network ID (16 hex characters) and that the ZeroTier service is running."
+            } else {
+                Write-Output-Box "[OK] Join command executed: $joinResult"
+            }
             Start-Sleep -Seconds 3
         }
         catch {
@@ -974,7 +1021,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"; Name="fDenyTSConnections"; Value=0},
             @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"; Name="fAllowToGetHelp"; Value=1},
             @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"; Name="AllowTSConnections"; Value=1},
-            @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="PortNumber"; Value=3389; Type="DWord"},
+            @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="PortNumber"; Value=$RdpPort; Type="DWord"},
             @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="SecurityLayer"; Value=0},
             @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="UserAuthentication"; Value=0},
             @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"; Name="fEnableWinStation"; Value=1},
@@ -1260,7 +1307,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                 }
             }
             else {
-                Write-Output-Box "[SUCCESS] Port 3389 is LISTENING - RDP is READY!"
+                Write-Output-Box "[SUCCESS] Port $RdpPort is LISTENING - RDP is READY!"
                 $rdpWorking = $true
             }
         }
@@ -1307,7 +1354,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             # Test RDP connectivity
             Write-Output-Box ""
             Write-Output-Box ">>> TESTING RDP CONNECTION <<<"
-            Write-Output-Box "[INFO] Testing RDP port 3389..."
+            Write-Output-Box "[INFO] Testing RDP port $RdpPort..."
             
             # Try multiple times to allow services to fully initialize
             $rdpReady = $false
@@ -1330,8 +1377,15 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                 Write-Output-Box "[INFO] RDP may need a few more seconds to initialize"
                 Write-Output-Box "[INFO] Or firewall may be blocking connections"
             }
-            # Port test is the final word on RDP readiness
-            if ($rdpReady) { $rdpWorking = $true }
+            if ($rdpReady) { Write-Output-Box "[INFO] RDP reachable via ZeroTier" }
+        }
+
+        # Authoritative status: never let a probe upgrade a conclusion the
+        # emergency-fix path already reached. Runs even when no ZeroTier IP was found.
+        $rdpWorking = Test-RdpListener -Port $RdpPort
+        if ($rdpWorking -and $ztIP -and -not $rdpReady) {
+            Write-Output-Box "[INFO] Listener is up locally but not reachable over ZeroTier yet."
+            Write-Output-Box "[INFO] Authorize this device in ZeroTier Central, then allow ~1 minute to propagate."
         }
         
         # Final Summary

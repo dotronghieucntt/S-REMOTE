@@ -1,4 +1,4 @@
-# Uninstall rdpwrap, patch termsrv.dll directly
+﻿# Uninstall rdpwrap, patch termsrv.dll directly
 # Admin required
 
 # Step 1: Stop services and restore original ServiceDll

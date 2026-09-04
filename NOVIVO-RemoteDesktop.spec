@@ -15,13 +15,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # ─── Paths ───────────────────────────────────────────────────────────────────
 HERE     = os.path.abspath(SPECPATH)   # noqa: F821 — SPECPATH injected by PyInstaller
 VER_FILE = os.path.join(HERE, "version.txt")
-VER      = open(VER_FILE).read().strip() if os.path.exists(VER_FILE) else "1.0.0"
+VER      = open(VER_FILE, encoding="utf-8").read().strip() if os.path.exists(VER_FILE) else "1.0.0"
 APP_NAME = f"NOVIVO Remote Desktop v{VER}"
 
 ICON_ICO  = os.path.join(HERE, "icon.ico")
 BACKEND   = os.path.join(HERE, "NOVIVO-Backend.ps1")
 LOGO_PNG  = os.path.join(HERE, "LOGO KO CHU.png")
-LOGO_FULL = os.path.join(HERE, "NEN DEN.png")
 VER_INFO  = os.path.join(HERE, "build_tmp", "version_info.txt")
 
 # ─── Data files ──────────────────────────────────────────────────────────────
@@ -30,10 +29,15 @@ _ctk_datas = collect_data_files("customtkinter", include_py_files=False)
 
 added_datas = (
     _ctk_datas
-    + [(BACKEND,   ".")]          # PowerShell backend → root of bundle
-    + [(LOGO_PNG,  ".")]          # logo (no text) → for splash / about
-    + [(LOGO_FULL, ".")]          # logo (full)    → for header image
+    + [(BACKEND,  ".")]           # PowerShell backend → root of bundle
+    + [(LOGO_PNG, ".")]           # logo (no text) → header
 )
+# version.txt and icon.ico are read at runtime. Only the .exe ships to users, so
+# without these the frozen app reports v1.0.0 and has no window icon.
+if os.path.exists(VER_FILE):
+    added_datas += [(VER_FILE, ".")]
+if os.path.exists(ICON_ICO):
+    added_datas += [(ICON_ICO, ".")]
 
 # ─── Hidden imports ───────────────────────────────────────────────────────────
 # Modules that PyInstaller's static analyser misses

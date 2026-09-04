@@ -16,7 +16,7 @@
 ```
 
 **Nhập:**
-- Network ID: `743993800f9dac1e` (hoặc network ID của bạn)
+- Network ID: network ID của bạn (lấy tại https://my.zerotier.com)
 - Username: tên user để login RDP
 - Password: mật khẩu (hoặc click "Random")
 
@@ -122,7 +122,7 @@ Restart-Service TermService
 
 **Fix:**
 1. Vào https://my.zerotier.com
-2. Chọn network: `743993800f9dac1e`
+2. Chọn network của bạn
 3. Tìm device mới và check ✓ vào "Auth"
 4. Đợi 10-30 giây để nhận IP
 

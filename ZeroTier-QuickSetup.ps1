@@ -78,7 +78,8 @@ $currentY += 62
 $radioTailscale.Add_CheckedChanged({
     if ($radioTailscale.Checked) {
         $labelNetworkID.Text = "Auth Key:"
-        if ($textNetworkID.Text -eq "743993800f9dac1e" -or [string]::IsNullOrWhiteSpace($textNetworkID.Text)) { $textNetworkID.Text = "tskey-auth-kyu5v2UXe821CNTRL-qbqc6oTyVbKPJ57h7s7SbKqXcdM4AYmVQ" }
+        # No credential ships with the tool - only clear a leftover ZeroTier ID
+        if ($textNetworkID.Text -match '^[0-9a-fA-F]{16}$') { $textNetworkID.Text = "" }
         $textNetworkID.ForeColor = [System.Drawing.Color]::Black
         $titleLabel.Text = ">>> TAILSCALE QUICK SETUP TOOL <<<"
     }
@@ -86,9 +87,7 @@ $radioTailscale.Add_CheckedChanged({
 $radioZeroTier.Add_CheckedChanged({
     if ($radioZeroTier.Checked) {
         $labelNetworkID.Text = "Network ID:"
-        if ($textNetworkID.Text -like "tskey-auth-*" -or [string]::IsNullOrWhiteSpace($textNetworkID.Text)) {
-            $textNetworkID.Text = "743993800f9dac1e"
-        }
+        if ($textNetworkID.Text -like "tskey-*") { $textNetworkID.Text = "" }
         $textNetworkID.ForeColor = [System.Drawing.Color]::Black
         $titleLabel.Text = ">>> ZEROTIER QUICK SETUP TOOL <<<"
     }
@@ -104,7 +103,7 @@ $form.Controls.Add($labelNetworkID)
 $textNetworkID = New-Object System.Windows.Forms.TextBox
 $textNetworkID.Location = New-Object System.Drawing.Point(($marginLeft + $labelWidth), $currentY)
 $textNetworkID.Size = New-Object System.Drawing.Size($inputWidth, 23)
-$textNetworkID.Text = "tskey-auth-kyu5v2UXe821CNTRL-qbqc6oTyVbKPJ57h7s7SbKqXcdM4AYmVQ"
+$textNetworkID.Text = ""
 $textNetworkID.ForeColor = [System.Drawing.Color]::Black
 $textNetworkID.Font = New-Object System.Drawing.Font("Consolas", 10)
 $form.Controls.Add($textNetworkID)

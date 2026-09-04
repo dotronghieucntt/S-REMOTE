@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Lists Tailscale tailnet devices and (optionally) deletes ones that have not
     been seen in the last N days (default 7).
@@ -72,15 +72,18 @@ try {
     exit 1
 }
 
-$devices = $resp.devices
-if (-not $devices -or $devices.Count -eq 0) {
+$devices = @($resp.devices)
+if ($devices.Count -eq 0) {
     Write-Host "No devices found in tailnet." -ForegroundColor Yellow
     exit 0
 }
 
 $cutoff = (Get-Date).ToUniversalTime().AddDays(-$Days)
 
-$rows = foreach ($d in $devices) {
+# @() everywhere below: a pipeline that yields exactly ONE object returns that
+# object, not an array, and $obj.Count is then empty - which would blank out the
+# device count in the delete confirmation prompt.
+$rows = @(foreach ($d in $devices) {
     $lastSeen = [datetime]::Parse($d.lastSeen, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
     [PSCustomObject]@{
         Hostname = $d.hostname
@@ -90,10 +93,10 @@ $rows = foreach ($d in $devices) {
         DaysAgo  = [math]::Round(((Get-Date).ToUniversalTime() - $lastSeen).TotalDays, 1)
         Status   = if ($lastSeen -lt $cutoff) { 'Inactive' } else { 'Active' }
     }
-}
+})
 
-$active   = $rows | Where-Object { $_.Status -eq 'Active' }
-$inactive = $rows | Where-Object { $_.Status -eq 'Inactive' }
+$active   = @($rows | Where-Object { $_.Status -eq 'Active' })
+$inactive = @($rows | Where-Object { $_.Status -eq 'Inactive' })
 
 Write-Host ""
 Write-Host "=== ACTIVE (seen within last $Days days) - $($active.Count) device(s), KEPT ===" -ForegroundColor Green

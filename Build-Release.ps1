@@ -53,7 +53,7 @@ foreach ($py in $pyCandidates) {
     # Also check per-user Scripts folder that pip --user installs to
     $ver3     = & $py --version 2>&1
     $pyVer    = if ($ver3 -match "Python (\d+\.\d+)") { $Matches[1] } else { "" }
-    $pyi_user = "$env:APPDATA\Python\Python$($pyVer -replace '\.','')Scripts\pyinstaller.exe"
+    $pyi_user = "$env:APPDATA\Python\Python$($pyVer -replace '\.','')\Scripts\pyinstaller.exe"
     if (Test-Path $pyi_sys)  { $PYTHON = $py ; $PYI = $pyi_sys  ; break }
     if (Test-Path $pyi_user) { $PYTHON = $py ; $PYI = $pyi_user ; break }
 }

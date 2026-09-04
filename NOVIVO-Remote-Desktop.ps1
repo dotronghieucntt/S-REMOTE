@@ -1,4 +1,4 @@
-# NOVIVO Remote Desktop Setup Tool
+﻿# NOVIVO Remote Desktop Setup Tool
 # Auto install Tailscale/ZeroTier + Enable RDP + Show connection info
 
 # ── Self-elevate to Administrator if not already ──────────────────────────────
@@ -245,9 +245,9 @@ $btnVpnTS.Add_Click({
     $labelNetworkID.Text = "Auth Key:"
     $titleLabel.Text     = ">>> TAILSCALE QUICK SETUP TOOL <<<"
     $lblKeyHdr.Text      = "Auth Key"
-    if ($textNetworkID.Text -eq "743993800f9dac1e" -or [string]::IsNullOrWhiteSpace($textNetworkID.Text)) {
-        $textNetworkID.Text = "tskey-auth-kyu5v2UXe821CNTRL-qbqc6oTyVbKPJ57h7s7SbKqXcdM4AYmVQ"
-    }
+    # No credential ships with the tool - only clear a value left over from the
+    # other VPN method (a 16-hex ZeroTier network ID).
+    if ($textNetworkID.Text -match '^[0-9a-fA-F]{16}$') { $textNetworkID.Text = "" }
 })
 
 $btnVpnZT.Add_Click({
@@ -261,9 +261,7 @@ $btnVpnZT.Add_Click({
     $labelNetworkID.Text = "Network ID:"
     $titleLabel.Text     = ">>> ZEROTIER QUICK SETUP TOOL <<<"
     $lblKeyHdr.Text      = "Network ID"
-    if ($textNetworkID.Text -like "tskey-auth-*" -or [string]::IsNullOrWhiteSpace($textNetworkID.Text)) {
-        $textNetworkID.Text = "743993800f9dac1e"
-    }
+    if ($textNetworkID.Text -like "tskey-*") { $textNetworkID.Text = "" }
 })
 
 # ── AUTH KEY section ──────────────────────────────────────────────────────────
@@ -279,7 +277,7 @@ $pnlLeft.Controls.Add($lblKeyHdr)
 $textNetworkID = New-Object System.Windows.Forms.TextBox
 $textNetworkID.Location    = New-Object System.Drawing.Point(14, 116)
 $textNetworkID.Size        = New-Object System.Drawing.Size(432, 30)
-$textNetworkID.Text        = "tskey-auth-kyu5v2UXe821CNTRL-qbqc6oTyVbKPJ57h7s7SbKqXcdM4AYmVQ"
+$textNetworkID.Text        = ""
 $textNetworkID.Font        = $fInput
 $textNetworkID.BackColor   = $clrInput
 $textNetworkID.ForeColor   = $clrTextPri

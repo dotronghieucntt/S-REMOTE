@@ -1,4 +1,4 @@
-# Test Script - Dry Run Mode
+﻿# Test Script - Dry Run Mode
 # Kiểm tra logic của ZeroTier QuickSetup mà không thực sự cài đặt
 
 Write-Host "=== ZEROTIER QUICKSETUP - DRY RUN TEST ===" -ForegroundColor Cyan
@@ -146,7 +146,7 @@ Test-Component "Icon file exists" {
 
 # Test 13: Validate Network ID format
 Test-Component "Default Network ID format" {
-    $networkId = "743993800f9dac1e"
+    $networkId = "0123456789abcdef"   # dummy fixture - never a real network ID
     return ($networkId -match '^[a-f0-9]{16}$')
 }
 

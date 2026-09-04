@@ -10,6 +10,7 @@ import json
 import threading
 import ctypes
 import random
+import re
 import string
 import tkinter as tk
 
@@ -43,9 +44,24 @@ BACKEND      = os.path.join(_BUNDLE,  "NOVIVO-Backend.ps1")  # bundled resource
 SERVERS_FILE = os.path.join(BASE_DIR, "servers.json")         # user-writable, next to EXE
 LOGO_ICO     = os.path.join(_BUNDLE,  "LOGO KO CHU.png")      # hexagon logo (no text)
 
-# Read version from version.txt (next to EXE / script), fallback to "1.0.0"
-_ver_file = os.path.join(BASE_DIR, "version.txt")
-APP_VERSION = open(_ver_file).read().strip() if os.path.exists(_ver_file) else "1.0.0"
+def _asset(name):
+    """Bundled copy wins: it is built with the binary and always matches it.
+    A file next to the EXE is only a fallback (and is the same path when running
+    from source, where BASE_DIR == _BUNDLE)."""
+    for base in (_BUNDLE, BASE_DIR):
+        p = os.path.join(base, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(_BUNDLE, name)
+
+
+# Read version from version.txt, fallback to "1.0.0"
+_ver_file = _asset("version.txt")
+try:
+    with open(_ver_file, encoding="utf-8") as _vf:
+        APP_VERSION = _vf.read().strip() or "1.0.0"
+except OSError:
+    APP_VERSION = "1.0.0"
 
 # ─── CustomTkinter config ────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
@@ -246,6 +262,8 @@ class ServerList(tk.Frame):
                 for i, r in enumerate(self._rows)]
 
     def load_all(self, servers: list[dict]):
+        # servers.json is user-editable - keep only well-formed rows
+        servers = [s for s in servers if isinstance(s, dict)] if isinstance(servers, list) else []
         for r in self._rows:
             r["frame"].destroy()
         self._rows.clear()
@@ -317,11 +335,7 @@ class UserTable(tk.Frame):
 
         def on_click(e=None):
             for r in self._rows:
-                r["sel"].set(False)
-                r["dot"].config(bg=C["input_bg"])
-                r["frame"].config(bg=C["input_bg"])
-                r["ue"].config(bg=self._U_BG)
-                r["pe"].config(bg=self._P_BG)
+                self._style_unselected(r)
             sel_var.set(True)
             sel_dot.config(bg=C["accent"])
             row_frame.config(bg="#1A1F40")
@@ -393,17 +407,26 @@ class UserTable(tk.Frame):
                     "ue": u_entry, "pe": p_entry}
         self._rows.append(row_data)
 
+    def _style_unselected(self, r):
+        r["sel"].set(False)
+        r["dot"].config(bg=C["input_bg"])
+        r["frame"].config(bg=C["input_bg"])
+        r["ue"].config(bg=self._U_BG)
+        r["pe"].config(bg=self._P_BG)
+
     def remove_selected(self):
-        remaining = []
-        for r in self._rows:
-            if r["sel"].get():
-                r["frame"].destroy()
-            else:
-                remaining.append(r)
-        if len(remaining) == 0 and len(self._rows) > 0:
-            self._rows[0]["frame"].pack(fill="x", pady=1)
-            remaining = [self._rows[0]]
-        self._rows = remaining
+        doomed = [r for r in self._rows if r["sel"].get()]
+        if not doomed:
+            return
+        # The table must never end up empty. When every row is selected the first
+        # one survives (just deselected) - a destroyed frame cannot be packed
+        # again, that raises TclError: bad window path name.
+        if len(doomed) == len(self._rows):
+            self._style_unselected(doomed.pop(0))
+        dead = {id(r) for r in doomed}
+        for r in doomed:
+            r["frame"].destroy()
+        self._rows = [r for r in self._rows if id(r) not in dead]
 
     def set_show_passwords(self, show: bool):
         self._show_pass = show
@@ -451,7 +474,7 @@ class NovivoCTkApp(ctk.CTk):
         self.resizable(True, True)
 
         # icon
-        ico = os.path.join(BASE_DIR, "icon.ico")
+        ico = _asset("icon.ico")
         if os.path.exists(ico):
             self.iconbitmap(ico)
 
@@ -690,12 +713,11 @@ class NovivoCTkApp(ctk.CTk):
                                             fg_color=C["border"],
                                             progress_color=C["accent"],
                                             height=6, width=200)
-        self._progress.pack(side="left", padx=14, pady=18)
-        # hidden until install runs
+        # not packed here - shown only while an install is running
 
         close_btn = ctk.CTkButton(
             bot, text="✕  CLOSE",
-            command=self.destroy,
+            command=self._on_close,
             fg_color="#2C0E10", hover_color="#3C1418",
             text_color=C["danger"],
             corner_radius=4,
@@ -712,7 +734,7 @@ class NovivoCTkApp(ctk.CTk):
                                      bg=C["status_bg"], fg=C["text_lo"],
                                      font=FONT_SMALL, anchor="w", padx=12)
         self._lbl_status.pack(side="left")
-        tk.Label(bar, text="NOVIVO Remote Desktop  v2.0",
+        tk.Label(bar, text=f"NOVIVO Remote Desktop  v{APP_VERSION}",
                  bg=C["status_bg"], fg=C["text_lo"],
                  font=FONT_SMALL, anchor="e", padx=12).pack(side="right")
 
@@ -785,6 +807,10 @@ class NovivoCTkApp(ctk.CTk):
 
     def _on_close(self):
         """Auto-save server list then close the window."""
+        if self._install_running and not messagebox.askyesno(
+                "Setup running",
+                "Setup is still running.\nClosing now leaves it unfinished.\n\nClose anyway?"):
+            return
         try:
             data = self._server_list.get_all()
             with open(SERVERS_FILE, "w", encoding="utf-8") as f:
@@ -803,11 +829,8 @@ class NovivoCTkApp(ctk.CTk):
                     return
             except Exception:
                 pass
-        # Default: one Tailscale row pre-filled
-        self._server_list.add_row(
-            name="Default",
-            key="tskey-auth-kyu5v2UXe821CNTRL-qbqc6oTyVbKPJ57h7s7SbKqXcdM4AYmVQ",
-            is_active=True)
+        # Default: one empty row - the tool ships no credential of its own
+        self._server_list.add_row(name="Default", key="", is_active=True)
 
     # ── User table actions ────────────────────────────────────────────────────
     def _add_user(self):
@@ -857,13 +880,19 @@ class NovivoCTkApp(ctk.CTk):
             return
         self.clipboard_clear()
         self.clipboard_append(text)
-        orig = self._btn_copy.cget("text")
         self._btn_copy.configure(text="✓ COPIED!", fg_color=C["success"])
         self.after(1600, lambda: self._btn_copy.configure(
-            text=orig, fg_color=C["btn_dim"]))
+            text="COPY LOG", fg_color=C["btn_dim"]))
 
     def _set_status(self, text):
         self._lbl_status.config(text=text)
+
+    def _ui(self, fn, *args):
+        """Marshal a call from the worker thread; drop it if the window is gone."""
+        try:
+            self.after(0, fn, *args)
+        except (tk.TclError, RuntimeError):
+            pass
 
     # ── Install ───────────────────────────────────────────────────────────────
     def _start_install(self):
@@ -879,6 +908,16 @@ class NovivoCTkApp(ctk.CTk):
             messagebox.showerror("Validation",
                 "No server key selected.\nAdd a server and enter its Auth Key / Network ID.")
             return
+        if method == "zerotier" and net_key.lower().startswith("tskey-"):
+            if not messagebox.askyesno("Check server key",
+                "ZeroTier is selected but this key looks like a Tailscale auth key "
+                "(tskey-…).\n\nRun anyway?"):
+                return
+        if method == "tailscale" and re.fullmatch(r"[0-9a-fA-F]{16}", net_key):
+            if not messagebox.askyesno("Check server key",
+                "Tailscale is selected but this key looks like a ZeroTier network ID "
+                "(16 hex characters).\n\nRun anyway?"):
+                return
         if not users:
             messagebox.showerror("Validation", "Add at least one user.")
             return
@@ -925,14 +964,14 @@ class NovivoCTkApp(ctk.CTk):
 
                 for line in proc.stdout:
                     line = line.rstrip()
-                    self.after(0, self._log_write, line)
+                    self._ui(self._log_write, line)
 
                 proc.wait()
                 exit_code = proc.returncode
-                self.after(0, self._install_done, exit_code)
+                self._ui(self._install_done, exit_code)
             except Exception as exc:
-                self.after(0, self._log_write, f"[ERROR] Failed to run backend: {exc}")
-                self.after(0, self._install_done, -1)
+                self._ui(self._log_write, f"[ERROR] Failed to run backend: {exc}")
+                self._ui(self._install_done, -1)
 
         threading.Thread(target=run, daemon=True).start()
 

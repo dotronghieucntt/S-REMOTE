@@ -9,7 +9,8 @@ VER_FILE = os.path.join(HERE, "version.txt")
 OUT_DIR  = os.path.join(HERE, "build_tmp")
 OUT_FILE = os.path.join(OUT_DIR, "version_info.txt")
 
-ver_str  = open(VER_FILE).read().strip()
+with open(VER_FILE, encoding="utf-8") as _f:
+    ver_str = _f.read().strip()
 parts    = [int(x) for x in ver_str.split(".")]
 while len(parts) < 4:
     parts.append(0)

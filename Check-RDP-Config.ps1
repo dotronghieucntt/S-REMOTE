@@ -1,4 +1,4 @@
-# Script kiểm tra cấu hình Remote Desktop
+﻿# Script kiểm tra cấu hình Remote Desktop
 # Chạy script này để verify xem RDP đã được cấu hình đúng chưa
 
 Write-Host "=== KIỂM TRA CẤU HÌNH REMOTE DESKTOP ===" -ForegroundColor Cyan
@@ -58,15 +58,18 @@ Write-Host ""
 
 # Check 3: Firewall Rules
 Write-Host "[3] Kiểm tra Firewall Rules..." -ForegroundColor Yellow
-$rdpRules = Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-$enabledRules = $rdpRules | Where-Object {$_.Enabled -eq $true}
+$rdpRules = @(Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue)
+$enabledRules = @($rdpRules | Where-Object {$_.Enabled -eq $true})
 Write-Host "   [OK] Remote Desktop rules: $($enabledRules.Count) enabled / $($rdpRules.Count) total" -ForegroundColor Green
 
-$ztRules = Get-NetFirewallRule -DisplayName "ZeroTier-RDP-*" -ErrorAction SilentlyContinue
-if ($ztRules) {
-    Write-Host "   [OK] ZeroTier RDP rules created: $($ztRules.Count)" -ForegroundColor Green
+# NOVIVO-Backend.ps1 names its rules "RDP-ZeroTier-*" / "RDP-Tailscale-*".
+# The old pattern here ("ZeroTier-RDP-*") never matched anything.
+$novivoRules = @(Get-NetFirewallRule -DisplayName "RDP-ZeroTier-*"  -ErrorAction SilentlyContinue) +
+               @(Get-NetFirewallRule -DisplayName "RDP-Tailscale-*" -ErrorAction SilentlyContinue)
+if ($novivoRules.Count -gt 0) {
+    Write-Host "   [OK] NOVIVO RDP rules created: $($novivoRules.Count)" -ForegroundColor Green
 } else {
-    Write-Host "   [!] No ZeroTier RDP rules found" -ForegroundColor Yellow
+    Write-Host "   [!] No NOVIVO RDP rules found" -ForegroundColor Yellow
 }
 
 Write-Host ""
