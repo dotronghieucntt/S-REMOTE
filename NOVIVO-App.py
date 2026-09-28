@@ -41,6 +41,7 @@ else:
     _BUNDLE  = BASE_DIR
 
 BACKEND      = os.path.join(_BUNDLE,  "NOVIVO-Backend.ps1")  # bundled resource
+ALWAYS_ADMIN = os.path.join(_BUNDLE,  "NOVIVO-AlwaysAdmin.ps1")  # bundled resource
 SERVERS_FILE = os.path.join(BASE_DIR, "servers.json")         # user-writable, next to EXE
 LOGO_ICO     = os.path.join(_BUNDLE,  "LOGO KO CHU.png")      # hexagon logo (no text)
 
@@ -102,6 +103,9 @@ FONT_BTN_LG  = ("Segoe UI", 12, "bold")
 FONT_INPUT   = ("Consolas", 10)
 FONT_LOG     = ("Consolas", 9)
 FONT_SMALL   = ("Segoe UI", 8)
+
+# Held as a constant because the button label is restored after every run
+BTN_ALWAYS_ADMIN = "🛡  ALWAYS RUN AS ADMINISTRATOR"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -515,6 +519,7 @@ class NovivoCTkApp(ctk.CTk):
             "Pressing START SETUP changes THIS computer:",
             "",
             "[INFO] 1. Installs and connects the selected VPN (Tailscale / ZeroTier)",
+            "[INFO]    and sets it to reconnect at every boot, before anyone logs in",
             "[INFO] 2. Creates or updates the Windows accounts listed on the left",
             "[INFO]    and adds every one of them to the Administrators group",
             "[INFO] 3. Enables Remote Desktop, opens the firewall on the RDP port",
@@ -704,6 +709,31 @@ class NovivoCTkApp(ctk.CTk):
         self._flat_btn(btn_row1, "- Remove User", C["danger"],   self._rem_user,   w=115).pack(side="left", padx=(0, 4))
         self._flat_btn(btn_row1, "Random Pwd",    C["success"],  self._rand_pass,  w=105).pack(side="left", padx=(0, 4))
         self._flat_btn(btn_row1, "Clear All",     C["text_lo"],  self._clear_pass, w=90 ).pack(side="left")
+
+        tk.Frame(left, bg=C["border"], height=1).pack(fill="x", pady=8)
+
+        # ── THIS TOOL ────────────────────────────────────────────────────────
+        # Separate from START SETUP: this configures the tool itself, not the
+        # VPN or the RDP host, and it only ever needs running once per machine.
+        self._section_header(left, "THIS TOOL", C["purple"])
+
+        self._btn_always_admin = ctk.CTkButton(
+            left,
+            text=BTN_ALWAYS_ADMIN,
+            command=self._set_always_admin,
+            fg_color=C["purple"],
+            hover_color="#8F63E8",
+            text_color="white",
+            corner_radius=6,
+            font=FONT_BTN,
+            height=36)
+        self._btn_always_admin.pack(fill="x", padx=14, pady=(6, 0))
+
+        tk.Label(left,
+                 text="ℹ  Machine-wide admin flag + a Desktop shortcut that skips the UAC prompt",
+                 bg=C["panel"], fg=C["text_lo"], font=("Segoe UI", 8),
+                 anchor="w", padx=18, wraplength=420, justify="left").pack(fill="x", pady=(2, 0))
+
         tk.Frame(left, bg=C["panel"], height=10).pack(fill="x")
 
     # ── Right Log Panel ────────────────────────────────────────────────────────
@@ -1008,26 +1038,45 @@ class NovivoCTkApp(ctk.CTk):
                 icon="warning", default=messagebox.CANCEL):
             return
 
-        self._install_running = True
-        self._btn_start.configure(state="disabled", text="⏳  RUNNING…")
-        self._progress.pack(side="left", padx=14, pady=18)
-        self._progress.start()
-        self._set_status("Installing…")
+        self._begin_busy(self._btn_start, "⏳  RUNNING…", "Installing…")
         self._clear_log()
 
-        users_json = json.dumps(users)
+        self._run_ps(BACKEND, [
+            "-Method",     method,
+            "-NetworkKey", net_key,
+            "-UsersJson",  json.dumps(users),
+            "-RdpPort",    rdp_port,
+        ], self._install_done)
 
+    # ── Backend runner (shared by every PowerShell action) ────────────────────
+    def _begin_busy(self, btn, busy_text, status):
+        """Lock both action buttons for the duration of one backend run."""
+        self._install_running = True
+        self._btn_start.configure(state="disabled")
+        self._btn_always_admin.configure(state="disabled")
+        btn.configure(text=busy_text)
+        self._progress.pack(side="left", padx=14, pady=18)
+        self._progress.start()
+        self._set_status(status)
+
+    def _end_busy(self):
+        self._install_running = False
+        self._btn_start.configure(state="normal", text="▶  START SETUP")
+        self._btn_always_admin.configure(state="normal", text=BTN_ALWAYS_ADMIN)
+        self._progress.stop()
+        self._progress.pack_forget()
+
+    def _run_ps(self, script: str, args: list, done_cb):
+        """Run a bundled PowerShell script on a worker thread, streaming each
+        line it prints into the log. done_cb(exit_code) runs on the UI thread."""
+        # Reset the per-run outcome the backend reports via its final
+        # "[NOVIVO-RESULT] <STATE>" line (see _scan_result_line).
+        self._run_result = None
         def run():
-            ps_cmd = [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-File", BACKEND,
-                "-Method", method,
-                "-NetworkKey", net_key,
-                "-UsersJson", users_json,
-                "-RdpPort", rdp_port
-            ]
+            ps_cmd = ["powershell.exe",
+                      "-NoProfile",
+                      "-ExecutionPolicy", "Bypass",
+                      "-File", script] + args
             try:
                 proc = subprocess.Popen(
                     ps_cmd,
@@ -1039,28 +1088,98 @@ class NovivoCTkApp(ctk.CTk):
                     creationflags=subprocess.CREATE_NO_WINDOW)
 
                 for line in proc.stdout:
-                    line = line.rstrip()
-                    self._ui(self._log_write, line)
+                    text = line.rstrip()
+                    self._scan_result_line(text)
+                    self._ui(self._log_write, text)
 
                 proc.wait()
-                exit_code = proc.returncode
-                self._ui(self._install_done, exit_code)
+                self._ui(done_cb, proc.returncode)
             except Exception as exc:
-                self._ui(self._log_write, f"[ERROR] Failed to run backend: {exc}")
-                self._ui(self._install_done, -1)
+                self._ui(self._log_write,
+                         f"[ERROR] Failed to run {os.path.basename(script)}: {exc}")
+                self._ui(done_cb, -1)
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _scan_result_line(self, text: str):
+        """Capture the backend's machine-readable verdict. The backend prints
+        exactly one '[NOVIVO-RESULT] <STATE>' line near the end; the last one
+        wins. This is the primary success signal — the exit code is a fallback
+        for older backends that don't emit it."""
+        marker = "[NOVIVO-RESULT]"
+        idx = text.find(marker)
+        if idx != -1:
+            state = text[idx + len(marker):].strip().split()
+            if state:
+                self._run_result = state[0].upper()
+
     def _install_done(self, exit_code: int):
-        self._install_running = False
-        self._btn_start.configure(state="normal", text="▶  START SETUP")
-        self._progress.stop()
-        self._progress.pack_forget()
+        self._end_busy()
+        # Prefer the backend's explicit verdict; fall back to the exit code
+        # (0=success, 3=restart, 4=authorise) for backends without the marker.
+        result = getattr(self, "_run_result", None)
+        if result is None:
+            result = {0: "SUCCESS", 2: "NOT_SUPPORTED", 3: "NEEDS_RESTART",
+                      4: "NEEDS_AUTH"}.get(exit_code, "FAILED")
+
+        if result == "SUCCESS":
+            self._set_status("Setup completed — RDP is ready.")
+            self._log_write("\n[OK] RDP listener verified. You can connect now.")
+        elif result == "NEEDS_RESTART":
+            self._set_status("Setup done, but a RESTART is required for RDP to start.")
+            self._log_write("\n[ACTION] Restart this machine, then wait ~2 minutes "
+                            "before connecting. RDP is NOT listening yet.")
+        elif result == "NEEDS_AUTH":
+            self._set_status("Setup done — authorise this device in the console to connect.")
+            self._log_write("\n[ACTION] RDP is listening locally, but this device is not "
+                            "reachable yet. Authorise it in the Tailscale/ZeroTier console, "
+                            "then wait ~1 minute.")
+        elif result == "NOT_SUPPORTED":
+            self._set_status("This Windows can't host the selected method — see the log.")
+            self._log_write("\n[INFO] Setup stopped and made no changes. Try the other "
+                            "network method, or use a supported Windows edition/build.")
+        else:  # FAILED / unknown
+            self._set_status(f"Setup FAILED — RDP is not ready (see log). Code {exit_code}.")
+            self._log_write(f"\n[ERROR] Setup did not complete successfully "
+                            f"(result={result}, code={exit_code}). Review the log above.")
+
+    # ── Always run as administrator ───────────────────────────────────────────
+    def _set_always_admin(self):
+        if self._install_running:
+            return
+
+        if not getattr(sys, "frozen", False):
+            messagebox.showinfo(
+                "Built .exe only",
+                "This configures the built NOVIVO .exe.\n\n"
+                "Running from source, the only thing to point it at is the Python "
+                "interpreter — and forcing that to elevate would affect every "
+                "unrelated script on this machine.\n\n"
+                "Build the .exe first, then run this from the .exe.")
+            return
+
+        target = sys.executable
+        if not messagebox.askyesno(
+                "Always run as Administrator",
+                f"For:\n{target}\n\nthis will:\n\n"
+                "•  set a machine-wide RUNASADMIN flag, so every user's launch elevates\n"
+                "•  register an elevated Scheduled Task\n"
+                "•  put a shortcut on your Desktop that opens the tool with NO UAC prompt\n\n"
+                "Both routes store an absolute path — re-run this if you move the .exe.\n\n"
+                "Continue?"):
+            return
+
+        self._begin_busy(self._btn_always_admin, "⏳  CONFIGURING…",
+                         "Configuring admin launch…")
+        self._clear_log()
+        self._run_ps(ALWAYS_ADMIN, ["-TargetPath", target], self._admin_done)
+
+    def _admin_done(self, exit_code: int):
+        self._end_busy()
         if exit_code == 0:
-            self._set_status("Setup completed successfully!")
-            self._log_write("\n[OK] All done. Exit code: 0")
+            self._set_status("Always-run-as-admin configured")
         else:
-            self._set_status(f"Setup finished with errors (code {exit_code})")
+            self._set_status(f"Admin setup finished with errors (code {exit_code})")
             self._log_write(f"\n[WARNING] Process exited with code {exit_code}")
 
 

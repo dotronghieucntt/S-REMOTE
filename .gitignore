@@ -24,3 +24,8 @@ servers.json
 
 # ── Old spec (replaced by NOVIVO-RemoteDesktop.spec) ─────────────────────────
 NOVIVO-App.spec
+
+# ── Backup archives (do NOT commit - can be hundreds of MB) ──────────────────
+*.rar
+*.7z
+/NOVIVO Remote desktop.rar

@@ -3,6 +3,43 @@ param([Parameter(Mandatory)][string]$Method,[string]$NetworkKey,[string]$UsersJs
 
 function Write-Output-Box { param([string]$Message,[string]$Color="Lime"); Write-Host $Message; [Console]::Out.Flush() }
 
+# ─── Setup outcome, reported to the GUI as a machine-readable final line ──────
+#  The GUI used to judge success purely by exit code, which was always 0, so a
+#  dead-RDP install still read "Setup completed successfully". The backend now
+#  states its real conclusion and exits with a code that matches it.
+$script:NovivoResult = $null   # SUCCESS | NEEDS_RESTART | NEEDS_AUTH | FAILED
+
+function Get-NovivoResultState {
+    # Single source of truth for the outcome, shared by both network branches so
+    # they cannot drift. Listener down is never a success; a listener that is up
+    # but has no overlay IP means the node still needs authorising in the console.
+    param([bool]$ListenerUp, [bool]$HasOverlayIP, [bool]$NeedsRestart)
+    if (-not $ListenerUp)  { return 'NEEDS_RESTART' }
+    if (-not $HasOverlayIP) { return 'NEEDS_AUTH' }
+    return 'SUCCESS'
+}
+
+function Test-TailscaleBackendReady {
+    # $true once the local tailscaled answers. Right after a fresh install the CLI
+    # returns "failed to connect to local Tailscale service" for a few seconds, and
+    # `tailscale up` fired in that window silently does nothing - the #1 reason a
+    # freshly installed node is left logged out.
+    param([string]$StatusText)
+    if ($null -eq $StatusText) { return $false }
+    return ($StatusText -notmatch 'failed to connect|cannot connect|is tailscaled running|couldn''t connect to')
+}
+
+function Test-TailscaleLoggedIn {
+    # Decide login state from `tailscale status`. `up` returning 0 is NOT proof of
+    # login, so the node is considered up only when it holds a 100.x tailnet IP and
+    # is not in a logged-out / needs-login / stopped state.
+    param([string]$StatusText)
+    if ([string]::IsNullOrWhiteSpace($StatusText)) { return $false }
+    if ($StatusText -match 'Logged out|NeedsLogin|Log in at|Tailscale is stopped') { return $false }
+    if (-not (Test-TailscaleBackendReady -StatusText $StatusText)) { return $false }
+    return [bool]($StatusText -match '(?m)^\s*100\.\d{1,3}\.\d{1,3}\.\d{1,3}\b')
+}
+
 function Test-RDPPort {
     param([string]$IPAddress, [int]$Port = 3389, [int]$TimeoutSeconds = 3)
     $tcp = $null
@@ -186,6 +223,7 @@ function Test-RdpWrapActive {
 function New-NovivoRepairScript {
     # One generated file is the single source of truth for repairing RDP, used
     # both as the install-time fallback and as the boot-time scheduled task.
+    param([int]$Port = 3389)
     $dir = "$env:ProgramData\NOVIVO"
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $path = Join-Path $dir 'Repair-NovivoRdp.ps1'
@@ -323,7 +361,7 @@ if (Invoke-TermSrvPatch) { exit 0 }
 Write-Log 'repair exhausted - RDP still down'
 exit 1
 '@
-    $body = $body.Replace('__PORT__', [string]$RdpPort)
+    $body = $body.Replace('__PORT__', [string]$Port)
     Set-Content -Path $path -Value $body -Encoding UTF8 -Force
     return $path
 }
@@ -374,7 +412,7 @@ function Install-HomeRdpSupport {
     if ($active.Ok) {
         Write-Output-Box "[OK] RDP is already listening - skipping RDP Wrapper install"
         Enable-NovivoMultiSession
-        $sp = New-NovivoRepairScript
+        $sp = New-NovivoRepairScript -Port $Port
         Register-NovivoRepairTask -ScriptPath $sp
         return $true
     }
@@ -419,7 +457,7 @@ function Install-HomeRdpSupport {
         Write-Output-Box "[WARNING] RDP Wrapper is installed but RDP is still not listening."
         Write-Output-Box "[INFO] This build most likely has no section in rdpwrap.ini."
         Write-Output-Box "[INFO] Falling back to patching termsrv.dll (backup + auto-rollback)..."
-        $sp = New-NovivoRepairScript
+        $sp = New-NovivoRepairScript -Port $Port
         try {
             $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
             $pp = Start-Process -FilePath $ps -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","`"$sp`"","-PatchOnly","-Port",$Port -Wait -PassThru -WindowStyle Hidden
@@ -436,7 +474,7 @@ function Install-HomeRdpSupport {
 
     # 5 + 6. concurrent sessions, and survive the next Windows Update
     Enable-NovivoMultiSession
-    $sp2 = New-NovivoRepairScript
+    $sp2 = New-NovivoRepairScript -Port $Port
     Register-NovivoRepairTask -ScriptPath $sp2
 
     return $ok
@@ -750,27 +788,64 @@ try {
             # TS-STEP 3: Connect / bring up Tailscale
             Write-Output-Box ''
             Write-Output-Box '[3/7] Connecting to Tailscale network...'
+            $tsLoggedIn = $false
             try {
-                # --unattended = persist "want-up" state to disk so Tailscale reconnects
-                # automatically after every reboot WITHOUT requiring user interaction
+                # 3a. Wait for the local tailscaled backend to answer. Firing
+                #     `tailscale up` before it is ready silently does nothing and
+                #     leaves the node logged out - the usual "cài xong không tự
+                #     đăng nhập" cause. Keep nudging the service while we wait.
+                $tsReady = $false
+                for ($tsW = 1; $tsW -le 20; $tsW++) {
+                    $tsProbe = & $tsCliPath status 2>&1 | Out-String
+                    if (Test-TailscaleBackendReady -StatusText $tsProbe) { $tsReady = $true; break }
+                    if ($tsW -eq 1) { Write-Output-Box '[INFO] Waiting for the Tailscale service to be ready...' }
+                    Start-Service -Name $tsSvcName -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 2
+                }
+                if ($tsReady) { Write-Output-Box '[OK] Tailscale service is responding' }
+                else { Write-Output-Box '[WARNING] Tailscale service slow to respond - trying to connect anyway' }
+
+                # 3b. Bring the node up headlessly. --unattended persists the
+                #     "want-up" state so it reconnects after every reboot with no
+                #     user interaction. Retry a few times: the first `up` right
+                #     after install often races the backend.
                 $tsUpArgs = @('up', '--unattended', '--accept-routes', '--accept-dns')
                 if (-not [string]::IsNullOrWhiteSpace($authKey)) {
-                    Write-Output-Box '[INFO] Using auth key to connect...'
+                    Write-Output-Box '[INFO] Using auth key to log in...'
                     $tsUpArgs += @('--authkey', $authKey)
                 } else {
-                    Write-Output-Box '[INFO] No auth key - browser login may open'
+                    Write-Output-Box '[INFO] No auth key given - a browser login may be required'
                 }
-                $tsUpOut = & $tsCliPath $tsUpArgs 2>&1 | Out-String
-                if ($LASTEXITCODE -ne 0 -or $tsUpOut -match 'invalid key|expired|unauthorized|failed|error') {
-                    Write-Output-Box "[ERROR] tailscale up did NOT succeed (exit code $LASTEXITCODE)"
-                    Write-Output-Box "[INFO] The auth key is most likely expired, already used or revoked."
-                    Write-Output-Box "[INFO] Generate a new one: https://login.tailscale.com/admin/settings/keys"
+
+                for ($tsTry = 1; $tsTry -le 3 -and -not $tsLoggedIn; $tsTry++) {
+                    try { $tsUpOut = & $tsCliPath $tsUpArgs 2>&1 | Out-String; $tsUpCode = $LASTEXITCODE }
+                    catch { $tsUpOut = $_.Exception.Message; $tsUpCode = -1 }
+                    if ($tsUpOut -and $tsUpOut.Trim()) { Write-Output-Box "  $($tsUpOut.Trim())" }
+
+                    Start-Sleep -Seconds 4
+                    # 3c. Trust the actual state, never the `up` exit code alone.
+                    $tsStatus = & $tsCliPath status 2>&1 | Out-String
+                    if (Test-TailscaleLoggedIn -StatusText $tsStatus) {
+                        $tsLoggedIn = $true; break
+                    }
+                    if ($tsUpOut -match 'invalid key|expired|unauthorized|revoked|already been used') {
+                        Write-Output-Box '[ERROR] The auth key was rejected (expired, revoked, or already used).'
+                        break   # a bad key will not fix itself on retry
+                    }
+                    Write-Output-Box "[INFO] Not logged in yet (attempt $tsTry/3) - retrying..."
+                    Start-Service -Name $tsSvcName -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 3
+                }
+
+                if ($tsLoggedIn) {
+                    Write-Output-Box '[OK] Tailscale is LOGGED IN (auto-reconnect on reboot enabled)'
                 } else {
-                    Write-Output-Box '[OK] tailscale up --unattended executed (auto-reconnect on reboot enabled)'
+                    Write-Output-Box '[ERROR] Tailscale did NOT log in.'
+                    Write-Output-Box '[INFO] Use a fresh REUSABLE auth key: https://login.tailscale.com/admin/settings/keys'
+                    Write-Output-Box '[INFO] (a normal key is single-use; a second machine needs a reusable key)'
                 }
-                if ($tsUpOut -and $tsUpOut.Trim()) { Write-Output-Box "Out: $($tsUpOut.Trim())" }
-                Start-Sleep -Seconds 5
-                # Show Tailscale connection status
+
+                # Show a short status snapshot for diagnostics
                 try {
                     $tsStatus = & $tsCliPath status 2>&1 | Out-String
                     if ($tsStatus) {
@@ -1199,6 +1274,9 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
                 Write-Output-Box "[OK] Port $RdpPort bound before finishing - restart cancelled"
                 $tsNeedsAutoRestart = $false
             }
+            # A node that never logged in has no reachable IP no matter what a
+            # late `ip -4` prints, so gate the overlay-IP signal on login too.
+            $script:NovivoResult = Get-NovivoResultState -ListenerUp ([bool]$tsRdpWorking) -HasOverlayIP ([bool]($tsIP -and $tsLoggedIn)) -NeedsRestart ([bool]$tsNeedsAutoRestart)
 
             # Final summary – Tailscale
             Write-Output-Box ""
@@ -1391,6 +1469,119 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             return
         }
         
+        # ZT-STEP 4.5: Configure ZeroTier to auto-connect on boot (headless/no-login)
+        Write-Output-Box ""
+        Write-Output-Box "[INFO] Configuring ZeroTier headless auto-start..."
+        try {
+            # 1. Service: Automatic + network dependency + recovery restart.
+            #    Plain 'auto', not delayed-auto: this host has to answer as early
+            #    in boot as it can, and the service already copes with the network
+            #    not being up yet.
+            $ztSvcName = 'ZeroTierOneService'
+            if (-not (Get-Service -Name $ztSvcName -ErrorAction SilentlyContinue)) {
+                $ztSvcName = Get-Service -DisplayName '*ZeroTier*' -ErrorAction SilentlyContinue |
+                             Select-Object -First 1 -ExpandProperty Name
+            }
+            if ($ztSvcName) {
+                & sc.exe config $ztSvcName start= auto 2>&1 | Out-Null
+                & sc.exe config $ztSvcName depend= Tcpip/Afd/Nsi 2>&1 | Out-Null
+                & sc.exe failure $ztSvcName reset= 86400 actions= restart/5000/restart/10000/restart/10000 2>&1 | Out-Null
+                Write-Output-Box "[OK] ZeroTier service '$ztSvcName': auto-start + network dependency + auto-recovery set"
+            } else {
+                Write-Output-Box "[WARNING] ZeroTier service not found - skipping service configuration"
+                $ztSvcName = 'ZeroTierOneService'
+            }
+
+            # 2. Boot re-join script. The service does persist joined networks on
+            #    its own, but a join that failed - or a wiped networks.d - would
+            #    otherwise leave this host unreachable until somebody logs in.
+            $ztScriptDir = "$env:ProgramData\ZeroTier"
+            if (-not (Test-Path $ztScriptDir)) { New-Item -ItemType Directory -Path $ztScriptDir -Force | Out-Null }
+            $ztScriptPath = "$ztScriptDir\rejoin-boot.ps1"
+            $ztCliPathEsc = $ztCliPath
+@"
+# ZeroTier boot re-join  -  runs as SYSTEM via Scheduled Task
+`$logFile = "`$env:ProgramData\ZeroTier\rejoin.log"
+"`$(Get-Date -f 'yyyy-MM-dd HH:mm:ss') ===== Boot re-join START =====" | Add-Content `$logFile
+
+# Wait up to 3 minutes for the ZeroTier service to be Running
+for (`$i = 1; `$i -le 18; `$i++) {
+    Start-Sleep -Seconds 10
+    `$svc = Get-Service -Name '$ztSvcName' -ErrorAction SilentlyContinue
+    "`$(Get-Date -f 'HH:mm:ss') Attempt `$i - Service: `$(`$svc.Status)" | Add-Content `$logFile
+    if (`$svc -and `$svc.Status -eq 'Running') { break }
+    if (`$i -eq 18) {
+        # Last resort: start it ourselves
+        Start-Service -Name '$ztSvcName' -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+    }
+}
+
+# join is idempotent - an already-joined network simply reports OK
+`$r1 = & "$ztCliPathEsc" -q join $networkID 2>&1 | Out-String
+"`$(Get-Date -f 'HH:mm:ss') join result: `$r1" | Add-Content `$logFile
+
+# Confirm the network really reached OK status before declaring success
+for (`$j = 1; `$j -le 12; `$j++) {
+    Start-Sleep -Seconds 5
+    `$nets = & "$ztCliPathEsc" -q listnetworks 2>&1 | Out-String
+    if (`$nets -match '$networkID' -and `$nets -match 'OK') {
+        "`$(Get-Date -f 'HH:mm:ss') network OK: `$nets" | Add-Content `$logFile
+        break
+    }
+    if (`$j -eq 12) { "`$(Get-Date -f 'HH:mm:ss') network NOT OK after 60s: `$nets" | Add-Content `$logFile }
+}
+"`$(Get-Date -f 'yyyy-MM-dd HH:mm:ss') ===== Boot re-join END =====" | Add-Content `$logFile
+"@ | Set-Content -Path $ztScriptPath -Encoding UTF8 -Force
+            Write-Output-Box "[OK] Re-join script written to $ztScriptPath"
+
+            # 3. Scheduled Task under SYSTEM - that is what makes it run with
+            #    nobody logged in and no password typed.
+            $ztTaskName = "ZeroTierAutoConnect"
+            Unregister-ScheduledTask -TaskName $ztTaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+            $ztTaskAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+                -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ztScriptPath`""
+
+            # Two triggers: boot, plus logon as a safety net if the boot one is missed
+            $ztTriggerBoot  = New-ScheduledTaskTrigger -AtStartup
+            $ztTriggerLogon = New-ScheduledTaskTrigger -AtLogOn
+
+            $ztTaskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            $ztTaskSettings  = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+                -ExecutionTimeLimit (New-TimeSpan -Minutes 20) `
+                -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 2) `
+                -MultipleInstances IgnoreNew
+
+            Register-ScheduledTask -TaskName $ztTaskName `
+                -Action $ztTaskAction `
+                -Trigger @($ztTriggerBoot, $ztTriggerLogon) `
+                -Principal $ztTaskPrincipal `
+                -Settings $ztTaskSettings `
+                -Description "Auto-connect ZeroTier at boot without requiring user login" `
+                -Force | Out-Null
+
+            # Run it once now to prove the task itself works
+            Start-ScheduledTask -TaskName $ztTaskName -ErrorAction SilentlyContinue
+
+            # 4. Read the startup type back rather than trusting sc.exe's exit code
+            $ztStartMode = (Get-CimInstance Win32_Service -Filter "Name='$ztSvcName'" -ErrorAction SilentlyContinue).StartMode
+            if ($ztStartMode -eq 'Auto') {
+                Write-Output-Box "[OK] Service startup type verified: $ztStartMode"
+            } elseif ($ztStartMode) {
+                Write-Output-Box "[WARNING] Service startup type is '$ztStartMode', expected 'Auto'"
+            } else {
+                Write-Output-Box "[WARNING] Could not read the service startup type back"
+            }
+
+            Write-Output-Box "[OK] Scheduled Task '$ztTaskName' created and started (boot + logon triggers)"
+            Write-Output-Box "[OK] Diagnostic log: $ztScriptDir\rejoin.log"
+            Write-Output-Box "[OK] ZeroTier will auto-connect on every restart (no login required)"
+        }
+        catch {
+            Write-Output-Box "[WARNING] Auto-start config: $($_.Exception.Message)"
+        }
+
         # STEP 5: Enable RDP  
         Write-Output-Box ""
         Write-Output-Box "[5/7] Enabling Remote Desktop..."
@@ -1743,6 +1934,7 @@ if (`$LASTEXITCODE -ne 0 -or `$r1 -match 'failed|error|unauthorized|Logged out')
             Write-Output-Box "[INFO] Listener is up locally but not reachable over ZeroTier yet."
             Write-Output-Box "[INFO] Authorize this device in ZeroTier Central, then allow ~1 minute to propagate."
         }
+        $script:NovivoResult = Get-NovivoResultState -ListenerUp ([bool]$rdpWorking) -HasOverlayIP ([bool]$ztIP) -NeedsRestart $false
         
         # Final Summary
         Write-Output-Box ""
@@ -1810,9 +2002,26 @@ catch {
     Write-Output-Box "[CRITICAL ERROR] $($_.Exception.Message)"
 }
 finally {
+    # ── Report the real outcome to the GUI (machine-readable) ──────────────
+    # Silence means something aborted before any branch concluded: treat that
+    # as a failure, never as success.
+    if (-not $script:NovivoResult) { $script:NovivoResult = 'FAILED' }
+    Write-Output-Box "[NOVIVO-RESULT] $script:NovivoResult"
+
     # ── Restore sleep settings ─────────────────────────────────────────────
     if ($_powerLoaded) {
         [void][Win32.NovivoPower]::SetThreadExecutionState([uint32]2147483648)  # ES_CONTINUOUS = reset
     }
     Write-Output-Box "[INFO] Sleep settings restored"
+
+    # ── Exit code mirrors the outcome: 0 ready, 3 needs restart, 4 needs
+    #    device authorisation, 1 failed. The GUI still reads the result line
+    #    above as the primary signal; the code is a fallback for scripting.
+    $script:NovivoExitCode = switch ($script:NovivoResult) {
+        'SUCCESS'       { 0 }
+        'NEEDS_RESTART' { 3 }
+        'NEEDS_AUTH'    { 4 }
+        default         { 1 }
+    }
+    exit $script:NovivoExitCode
 }
