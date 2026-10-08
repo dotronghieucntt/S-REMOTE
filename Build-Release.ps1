@@ -204,6 +204,7 @@ if (-not $SkipGitHub) {
         git add Build-Release.ps1
         git add NOVIVO-App.py
         git add NOVIVO-Backend.ps1
+        git add NOVIVO-AlwaysAdmin.ps1
         git add "LOGO KO CHU.png"
         git add "NEN DEN.png"
         git add releases/

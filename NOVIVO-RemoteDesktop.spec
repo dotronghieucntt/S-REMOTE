@@ -20,6 +20,7 @@ APP_NAME = f"NOVIVO Remote Desktop v{VER}"
 
 ICON_ICO  = os.path.join(HERE, "icon.ico")
 BACKEND   = os.path.join(HERE, "NOVIVO-Backend.ps1")
+ALW_ADMIN = os.path.join(HERE, "NOVIVO-AlwaysAdmin.ps1")
 LOGO_PNG  = os.path.join(HERE, "LOGO KO CHU.png")
 VER_INFO  = os.path.join(HERE, "build_tmp", "version_info.txt")
 
@@ -29,8 +30,9 @@ _ctk_datas = collect_data_files("customtkinter", include_py_files=False)
 
 added_datas = (
     _ctk_datas
-    + [(BACKEND,  ".")]           # PowerShell backend → root of bundle
-    + [(LOGO_PNG, ".")]           # logo (no text) → header
+    + [(BACKEND,   ".")]          # PowerShell backend → root of bundle
+    + [(ALW_ADMIN, ".")]          # "always run as admin" helper → root of bundle
+    + [(LOGO_PNG,  ".")]          # logo (no text) → header
 )
 # version.txt and icon.ico are read at runtime. Only the .exe ships to users, so
 # without these the frozen app reports v1.0.0 and has no window icon.
