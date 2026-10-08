@@ -29,3 +29,7 @@ NOVIVO-App.spec
 *.rar
 *.7z
 /NOVIVO Remote desktop.rar
+
+# Ban sao luu cuc bo (vd servers.json.bak-co-key chua key) - KHONG bao gio commit.
+# Build-Release.ps1 chay 'git add releases/' nen phai chan o day.
+*.bak-*

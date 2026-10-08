@@ -21,7 +21,12 @@ $script:Sandbox = New-NovivoSandbox -BackendPath $backend -Functions @(
     'Test-NovivoOSSupport',
     'Get-NovivoOSInfo',
     'Test-RdpListener',
-    'Test-RdpWrapActive'
+    'Test-RdpWrapActive',
+    'Set-NovivoBootService',
+    'Get-NovivoPowerSchemes',
+    'Get-NovivoPowerValue',
+    'Set-NovivoNoSleep',
+    'Get-NovivoKeepAwakeScript'
 )
 
 # ── shorthands ───────────────────────────────────────────────────────────────
@@ -189,6 +194,117 @@ foreach ($c in $tsLoginCases) {
         -Assert ([scriptblock]::Create("param(`$a,`$log) Should-Be `$a `$$($c.want) 'loggedIn'"))
 }
 
-# ── verdict ──────────────────────────────────────────────────────────────────
+# ============================================================================
+#  GROUP 7 - Boot service (Tailscale must be up at the LOGIN SCREEN)
+#  delayed-auto starts ~2 min after boot: the login screen came up unreachable.
+# ============================================================================
+function New-SimService { param([string]$Name,[string]$Mode='Auto',[bool]$Delayed=$true)
+    [pscustomobject]@{ Name=$Name; StartMode=$Mode; DelayedAutoStart=$Delayed } }
+
+Invoke-NovivoScenario -Group 'BootService' -Name 'delayed-auto Tailscale => plain Auto, read back' `
+    -Machine @{ Services=@{ Tailscale=(New-SimService 'Tailscale' 'Auto' $true) } } `
+    -Act { Set-NovivoBootService -Name 'Tailscale' } `
+    -Assert { param($a,$log)
+        Should-Be $a $true 'ok'
+        $svc = $global:__N.Services['Tailscale']
+        Should-Be $svc.StartMode 'Auto' 'StartMode'; Should-Be $svc.DelayedAutoStart $false 'DelayedAutoStart'
+        Should-Be $global:__N.Reg['HKLM:\SYSTEM\CurrentControlSet\Services\Tailscale|DelayedAutostart'] 0 'DelayedAutostart reg'
+        if (-not ($global:__N.ScCalls -contains 'config Tailscale start= auto')) { throw 'sc config start= auto not issued' }
+        if ($global:__N.ScCalls | Where-Object { $_ -match 'delayed-auto' }) { throw 'delayed-auto issued' }
+        if (-not ($global:__N.ScCalls | Where-Object { $_ -match '^failure Tailscale .*restart/5000' })) { throw 'recovery not set' }
+        if (-not ($log | Where-Object { $_ -match '^\[OK\].*not delayed' })) { throw 'no OK line' } }
+
+Invoke-NovivoScenario -Group 'BootService' -Name 'manual service => Auto' `
+    -Machine @{ Services=@{ Tailscale=(New-SimService 'Tailscale' 'Manual' $false) } } `
+    -Act { Set-NovivoBootService -Name 'Tailscale' } `
+    -Assert { param($a,$log) Should-Be $a $true 'ok'; Should-Be $global:__N.Services['Tailscale'].StartMode 'Auto' 'StartMode' }
+
+Invoke-NovivoScenario -Group 'BootService' -Name 'sc.exe changes nothing (policy) => NOT ok + warning' `
+    -Machine @{ ScIgnored=$true; Services=@{ Tailscale=(New-SimService 'Tailscale' 'Auto' $true) } } `
+    -Act { Set-NovivoBootService -Name 'Tailscale' } `
+    -Assert { param($a,$log) Should-Be $a $false 'ok'
+        if (-not ($log | Where-Object { $_ -match '^\[WARNING\].*delayed' })) { throw 'no delayed warning' } }
+
+Invoke-NovivoScenario -Group 'BootService' -Name 'service missing => NOT ok + warning' `
+    -Machine @{} `
+    -Act { Set-NovivoBootService -Name 'Tailscale' } `
+    -Assert { param($a,$log) Should-Be $a $false 'ok'
+        if (-not ($log | Where-Object { $_ -match '^\[WARNING\].*read' })) { throw 'no warning' } }
+
+# ============================================================================
+#  GROUP 8 - Never sleep (every power plan, AC + battery, re-applied at boot)
+# ============================================================================
+$BAL = '381b4222-f694-41f0-9685-ff5bb260df2e'
+$HIP = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+$UNATTEND = '7bc4a2f9-d8fc-4469-b07b-33eb785aaca0'
+$NETSTBY  = 'f15576e8-98b7-4186-b944-eafa664402d9'
+function New-SimPower { param([string]$Lang='en',[bool]$Locked=$false)
+    @{ Schemes=@($BAL,$HIP); Active=$BAL; V=@{}; Hibernate=$true; Locked=$Locked; Lang=$Lang } }
+function PV { param($s,$sub,$set,$m) $global:__N.Power.V["$($s.ToLower())|$sub|$($set.ToLower())|$m"] }
+
+foreach ($lang in 'en','vi') {
+    Invoke-NovivoScenario -Group 'NoSleep' -Name "two power plans, $lang labels => never sleep everywhere" `
+        -Machine @{ Power=(New-SimPower -Lang $lang) } `
+        -Act { Set-NovivoNoSleep } `
+        -Assert { param($a,$log)
+            Should-Be $a $true 'ok'
+            foreach ($s in $BAL,$HIP) {
+                foreach ($m in 'AC','DC') {
+                    Should-Be (PV $s 'SUB_SLEEP' 'STANDBYIDLE' $m)   0 "$s sleep $m"
+                    Should-Be (PV $s 'SUB_SLEEP' 'HIBERNATEIDLE' $m) 0 "$s hibernate $m"
+                    Should-Be (PV $s 'SUB_SLEEP' $UNATTEND $m)       0 "$s unattended $m"
+                }
+                Should-Be (PV $s 'SUB_BUTTONS' 'LIDACTION' 'AC') 0 "$s lid AC"
+                if ($null -ne (PV $s 'SUB_BUTTONS' 'LIDACTION' 'DC')) { throw "$s lid on battery must be left alone" }
+                Should-Be (PV $s 'SUB_NONE' $NETSTBY 'AC') 1 "$s network in standby"
+            }
+            Should-Be $global:__N.Power.Hibernate $false 'hibernate'
+            Should-Be $global:__N.Reg['HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power|HiberbootEnabled'] 0 'fast startup'
+            if (-not ($log | Where-Object { $_ -match '^\[OK\] Sleep turned off permanently \(2 power plan' })) { throw 'no OK line' } }
+}
+
+Invoke-NovivoScenario -Group 'NoSleep' -Name 'Group Policy ignores writes => NOT ok + warning' `
+    -Machine @{ Power=(New-SimPower -Locked $true) } `
+    -Act { Set-NovivoNoSleep } `
+    -Assert { param($a,$log) Should-Be $a $false 'ok'
+        if (-not ($log | Where-Object { $_ -match '^\[WARNING\].*AC=1800s DC=900s.*Group Policy' })) { throw "no warning: $($log -join ' | ')" } }
+
+Invoke-NovivoScenario -Group 'NoSleep' -Name 'plan list: GUIDs only, de-duplicated, lower-case' `
+    -Machine @{ Power=@{ Schemes=@($BAL.ToUpper(),$HIP,$HIP); Active=$HIP; V=@{}; Hibernate=$true; Locked=$false; Lang='vi' } } `
+    -Act { ,@(Get-NovivoPowerSchemes) } `
+    -Assert { param($a,$log) Should-Be ($a -join ',') "$BAL,$HIP" 'schemes' }
+
+Invoke-NovivoScenario -Group 'NoSleep' -Name 'boot script: parses, carries the same functions, calls Set-NovivoNoSleep' `
+    -Machine @{} `
+    -Act { Get-NovivoKeepAwakeScript } `
+    -Assert { param($a,$log)
+        $tok=$null; $err=$null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($a, [ref]$tok, [ref]$err)
+        if ($err -and $err.Count) { throw "parse: $($err[0].Message)" }
+        $fns = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) | ForEach-Object { $_.Name })
+        foreach ($f in 'Write-Output-Box','Get-NovivoPowerSchemes','Get-NovivoPowerValue','Set-NovivoNoSleep') {
+            if ($fns -notcontains $f) { throw "missing function $f" } }
+        if ($a -notmatch '(?m)^\[void\]\(Set-NovivoNoSleep\)\s*$') { throw 'does not call Set-NovivoNoSleep' }
+        if ($a -match 'tskey-') { throw 'secret in boot script' } }
+
+# ============================================================================
+#  GROUP 9 - Static wiring checks on the backend source
+# ============================================================================
+$bsrc = Get-Content $backend -Raw
+Invoke-NovivoScenario -Group 'Static' -Name 'no service is set to delayed-auto' -Machine @{ Src=$bsrc } `
+    -Act { $global:__N.Src } -Assert { param($a,$log) if ($a -match 'start=\s*delayed-auto') { throw 'delayed-auto still used' } }
+Invoke-NovivoScenario -Group 'Static' -Name 'Tailscale service goes through Set-NovivoBootService' -Machine @{ Src=$bsrc } `
+    -Act { $global:__N.Src } -Assert { param($a,$log) if ($a -notmatch 'Set-NovivoBootService -Name \$tsSvcName2') { throw 'not wired' } }
+Invoke-NovivoScenario -Group 'Static' -Name 'install applies never-sleep + registers keep-awake task' -Machine @{ Src=$bsrc } `
+    -Act { $global:__N.Src } -Assert { param($a,$log)
+        if ($a -notmatch '(?m)^\[void\]\(Set-NovivoNoSleep\)') { throw 'Set-NovivoNoSleep not called at top level' }
+        if ($a -notmatch '(?m)^Register-NovivoKeepAwakeTask') { throw 'keep-awake task not registered' } }
+Invoke-NovivoScenario -Group 'Static' -Name 'logon autostart never targets the console CLI' -Machine @{ Src=$bsrc } `
+    -Act { $global:__N.Src } -Assert { param($a,$log)
+        # case-sensitive: the CLI path list (\Tailscale\tailscale.exe) is legitimate
+        if ($a -cmatch '\\Tailscale\\Tailscale\.exe') { throw 'Startup shortcut still targets the old tray path (= the CLI)' }
+        if ($a -match '\$tsRunExe') { throw 'Run key still targets the CLI' } }
+
+# -- verdict ------------------------------------------------------------------
 $failed = Write-NovivoSummary
 exit $failed

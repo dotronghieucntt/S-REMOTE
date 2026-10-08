@@ -11,9 +11,15 @@ import threading
 import ctypes
 import random
 import re
+import socket
+import ssl
 import string
+import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 
+import certifi
 import customtkinter as ctk
 from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
@@ -144,6 +150,80 @@ def random_password(length=12):
     return "".join(random.choice(chars) for _ in range(length))
 
 
+# ─── Shared Tailscale key (unlock code) ──────────────────────────────────────
+# The shared key is never built into the EXE (the release secret scan blocks
+# that). Typing the unlock code into a Tailscale key box trades it with the
+# landing server for the key; the server holds both and rate-limits guesses.
+UNLOCK_URL       = "https://remote.novivo.net/api/ts-key"
+UNLOCK_CODE_RE   = re.compile(r"[0-9]{6,12}")   # keys start "tskey-", ZT IDs are 16 hex
+UNLOCK_SEP_RE    = re.compile(r"[\s.\-]+")      # "0963 090 141" is still the code
+UNLOCK_CODEISH   = re.compile(r"[0-9\s.\-]+")   # what is masked while being typed
+UNLOCK_AUTO_MS   = 900                          # pause after typing -> unlock by itself
+UNLOCK_TIMEOUT_S = 15
+
+
+def normalize_code(text: str):
+    """The unlock code in `text`, or None when `text` is not a code."""
+    code = UNLOCK_SEP_RE.sub("", text or "")
+    return code if UNLOCK_CODE_RE.fullmatch(code) else None
+
+
+def _unlock_ssl_context():
+    # Windows store first, plus certifi's Mozilla roots: a freshly installed
+    # Windows can lack the newer Let's Encrypt roots remote.novivo.net chains to,
+    # and Python (unlike browsers) never downloads missing roots by itself.
+    ctx = ssl.create_default_context()
+    try:
+        ctx.load_verify_locations(certifi.where())
+    except OSError:
+        pass
+    return ctx
+
+
+def fetch_shared_key(code: str):
+    """(True, key, "ok") or (False, message, kind) where kind is "wrong" (bad
+    code), "locked" (too many bad codes) or "error" (network/server)."""
+    req = urllib.request.Request(
+        UNLOCK_URL,
+        data=json.dumps({"code": code}).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "User-Agent": f"NOVIVO-Remote-Desktop/{APP_VERSION}"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=UNLOCK_TIMEOUT_S,
+                                    context=_unlock_ssl_context()) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            body = None
+        # Our server always answers JSON; anything else is Cloudflare/a proxy
+        msg = body.get("message") if isinstance(body, dict) else None
+        if msg and exc.code == 403:
+            return False, msg, "wrong"
+        if msg and exc.code == 429:
+            return False, msg, "locked"
+        return False, msg or f"Máy chủ từ chối (HTTP {exc.code}).", "error"
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            return False, ("Lỗi chứng chỉ SSL khi gọi remote.novivo.net — kiểm tra "
+                           "ngày giờ của máy tính."), "error"
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            return False, f"remote.novivo.net không phản hồi (quá {UNLOCK_TIMEOUT_S} giây).", "error"
+        return False, f"Không kết nối được remote.novivo.net: {exc.reason}", "error"
+    except (TimeoutError, socket.timeout):
+        return False, f"remote.novivo.net không phản hồi (quá {UNLOCK_TIMEOUT_S} giây).", "error"
+    except Exception as exc:
+        return False, f"Lỗi khi mở khoá key: {type(exc).__name__}: {exc}", "error"
+    if not isinstance(body, dict):
+        return False, "Máy chủ trả dữ liệu không đúng dạng.", "error"
+    key = body.get("key")
+    if body.get("ok") and isinstance(key, str) and key.startswith("tskey-"):
+        return True, key, "ok"
+    return False, "Máy chủ không trả về key.", "error"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SERVER LIST  (multi-server manager with radio select, save, set-default)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -155,16 +235,23 @@ class ServerList(tk.Frame):
     _PH_NAME  = "Server name…"
     _PH_KEY_TS = "tskey-auth-…"
     _PH_KEY_ZT = "network ID…"
+    _MASK     = "•" * 24        # shown in place of an unlocked shared key
 
-    def __init__(self, master, vpn_method_var: tk.StringVar, **kw):
+    def __init__(self, master, vpn_method_var: tk.StringVar,
+                 status_cb=None, log_cb=None, **kw):
         super().__init__(master, bg=C["panel"], **kw)
         self._rows: list[dict] = []
         self._active_idx = tk.IntVar(value=0)
         self._vpn_var = vpn_method_var
+        self._status = status_cb or (lambda text: None)
+        self._log = log_cb or (lambda text: None)
         self._build_header()
         # Rows grow the frame; the surrounding ScrollFrame scrolls if needed.
         self._inner = tk.Frame(self, bg=C["panel"])
         self._inner.pack(fill="x")
+        # Unlock feedback right under the rows (the status bar is easy to miss)
+        self._msg = tk.Label(self, text="", bg=C["panel"], fg=C["text_lo"],
+                             font=FONT_SMALL, anchor="w", justify="left")
 
     def _build_header(self):
         hdr = tk.Frame(self, bg=C["grid_head"], height=26)
@@ -196,6 +283,7 @@ class ServerList(tk.Frame):
         row.pack_propagate(False)
         n_is_ph = [False]          # name always has a real value (numbered default)
         k_is_ph = [not bool(key)]
+        vault   = [None]           # unlocked shared key - memory only, never shown or saved
 
         rb = tk.Radiobutton(
             row, variable=self._active_idx, value=idx,
@@ -228,16 +316,202 @@ class ServerList(tk.Frame):
             if k_is_ph[0]:
                 k_entry.delete(0, "end"); k_entry.config(fg=C["text_hi"]); k_is_ph[0] = False
         def k_fo(e):
+            if rec["busy"][0]:
+                return
             if not k_entry.get().strip():
+                self._cancel_auto(rec)
                 k_entry.delete(0, "end"); k_entry.insert(0, self._ph_key())
-                k_entry.config(fg=self._PH_FG); k_is_ph[0] = True
+                k_entry.config(fg=self._PH_FG, show=""); k_is_ph[0] = True
+            else:
+                self._try_unlock(rec)
+        def drop_vault(e=None):
+            # Typing or pasting over an unlocked key replaces it entirely. Widget
+            # bindings run before the Entry class inserts the character.
+            if vault[0]:
+                vault[0] = None
+                k_entry.delete(0, "end")
+        def k_key(e):
+            # <Key> outranks <<Paste>> on the widget tag, so Ctrl+V/X land here too
+            ctrl_edit = (e.state & 0x4) and e.keysym.lower() in ("v", "x")
+            if ((e.char and e.char.isprintable()) or ctrl_edit
+                    or e.keysym in ("BackSpace", "Delete")):
+                drop_vault()
+        def k_typed(e):
+            if k_is_ph[0] or vault[0]:
+                return
+            code = self._row_code(rec)
+            if rec["busy"][0]:
+                if code == rec["sent"][0]:
+                    return                      # nothing changed (Shift, arrows…)
+                self._abandon(rec)              # edited mid-request: result is stale
+            if rec["failed"][0] and code != rec["failed"][0]:
+                rec["failed"][0] = None
+                self._show_msg("", C["text_lo"])
+            k_entry.config(fg=C["danger"] if code and code == rec["failed"][0]
+                           else C["text_hi"])
+            self._mask_code(rec)
+            self._schedule_auto(rec)
 
         n_entry.bind("<FocusOut>", n_fo)
         k_entry.bind("<FocusIn>",  k_fi); k_entry.bind("<FocusOut>", k_fo)
+        k_entry.bind("<Key>", k_key)
+        k_entry.bind("<KeyRelease>", k_typed)
+        k_entry.bind("<<Paste>>", drop_vault)
+        k_entry.bind("<Return>",   lambda e: self._try_unlock(rec))
+        k_entry.bind("<KP_Enter>", lambda e: self._try_unlock(rec))
 
-        self._rows.append({"idx": idx, "frame": row, "radio": rb,
-                           "ne": n_entry, "ke": k_entry,
-                           "n_is_ph": n_is_ph, "k_is_ph": k_is_ph})
+        rec = {"idx": idx, "frame": row, "radio": rb,
+               "ne": n_entry, "ke": k_entry,
+               "n_is_ph": n_is_ph, "k_is_ph": k_is_ph,
+               "vault": vault, "busy": [False],
+               "auto": [None],        # pending after() id of the auto unlock
+               "req": [None],         # token of the request in flight
+               "sent": [None],        # code of the request in flight
+               "failed": [None],      # last code the server rejected
+               "then": [None]}        # run after a successful unlock (START)
+        self._rows.append(rec)
+        if key:
+            self._mask_code(rec)
+
+    # ── Unlock code -> shared Tailscale key ──────────────────────────────────
+    # Triggers: a pause after typing (auto), Enter, leaving the box, START.
+    # The code never stays usable as a "key": get_active_key() never returns it
+    # and get_all() never saves it, so a failed unlock can stay in the box.
+    def _row_code(self, rec):
+        if (self._vpn_var.get() != "tailscale" or rec["k_is_ph"][0]
+                or rec["vault"][0]):
+            return None
+        return normalize_code(rec["ke"].get())
+
+    def _mask_code(self, rec):
+        """Hide a code while it is typed; keys and ZeroTier IDs stay visible."""
+        text = rec["ke"].get()
+        hide = (self._vpn_var.get() == "tailscale" and not rec["k_is_ph"][0]
+                and not rec["vault"][0] and bool(UNLOCK_CODEISH.fullmatch(text)))
+        rec["ke"].config(show="•" if hide else "")
+
+    def _cancel_auto(self, rec):
+        if rec["auto"][0]:
+            try:
+                self.after_cancel(rec["auto"][0])
+            except tk.TclError:
+                pass
+            rec["auto"][0] = None
+
+    def _schedule_auto(self, rec):
+        self._cancel_auto(rec)
+        if self._row_code(rec):
+            rec["auto"][0] = self.after(UNLOCK_AUTO_MS,
+                                        lambda: self._try_unlock(rec, auto=True))
+
+    def _show_msg(self, text, color):
+        self._msg.config(text=text, fg=color)
+        if text:
+            self._msg.pack(fill="x", padx=6, pady=(3, 0))
+        else:
+            self._msg.pack_forget()
+
+    def _try_unlock(self, rec, auto=False):
+        """Start unlocking `rec`. True when a request is (now) in flight."""
+        if auto:
+            rec["auto"][0] = None
+        else:
+            self._cancel_auto(rec)
+        if rec["busy"][0]:
+            return True
+        code = self._row_code(rec)
+        if not code:
+            return False
+        if auto and code == rec["failed"][0]:
+            return False            # already rejected; Enter/START retries on purpose
+        rec["busy"][0] = True
+        rec["sent"][0] = code
+        token = object()
+        rec["req"][0] = token
+        self._show_msg("⏳  Đang mở khoá key Tailscale…", C["warn"])
+        self._status("Unlocking shared Tailscale key…")
+
+        # The box stays editable (an auto unlock fires mid-typing); editing it
+        # abandons this request. The worker never touches Tk, the UI thread
+        # polls; the deadline covers what urlopen's timeout doesn't (stuck DNS).
+        result = []
+        threading.Thread(target=lambda: result.append(fetch_shared_key(code)),
+                         daemon=True).start()
+        deadline = time.monotonic() + UNLOCK_TIMEOUT_S + 10
+
+        def poll():
+            if rec["req"][0] is not token:
+                return                              # abandoned
+            if result:
+                self._unlock_done(rec, code, *result[0])
+            elif time.monotonic() > deadline:
+                self._unlock_done(rec, code, False,
+                                  "remote.novivo.net không phản hồi.", "error")
+            else:
+                self.after(100, poll)
+        self.after(100, poll)
+        return True
+
+    def _forget_row(self, rec):
+        """Before a row is destroyed: no timer or reply may touch it after."""
+        self._cancel_auto(rec)
+        if rec["busy"][0]:
+            self._abandon(rec)
+
+    def _abandon(self, rec):
+        rec["busy"][0] = False
+        rec["req"][0] = None
+        rec["sent"][0] = None
+        rec["then"][0] = None
+        self._show_msg("", C["text_lo"])
+
+    def _unlock_done(self, rec, code, ok, payload, kind):
+        then = rec["then"][0]
+        self._abandon(rec)
+        e = rec["ke"]
+        try:
+            if not e.winfo_exists():
+                return                              # row removed meanwhile
+        except tk.TclError:
+            return
+        if self._vpn_var.get() != "tailscale" or normalize_code(e.get()) != code:
+            return                                  # switched to ZeroTier / box edited
+        if ok:
+            rec["vault"][0] = payload
+            rec["failed"][0] = None
+            e.delete(0, "end")
+            e.insert(0, self._MASK)
+            e.config(fg=C["success"], show="")
+            self._show_msg("🔒  Đã mở khoá key Tailscale dùng chung — key được ẩn, "
+                           "không lưu vào máy.", C["success"])
+            self._status("Shared Tailscale key unlocked (hidden).")
+            self._log("[OK] Đã mở khoá key Tailscale dùng chung (key được ẩn).")
+            if then:
+                self.after(50, then)
+            return
+        rec["failed"][0] = code
+        e.config(fg=C["danger"])
+        hint = {"wrong": "  — sửa lại mã", "locked": "",
+                "error": "  — bấm Enter để thử lại"}.get(kind, "")
+        self._show_msg(f"✖  {payload}{hint}", C["danger"])
+        self._status(f"Key unlock failed: {payload}")
+        self._log(f"[ERROR] Mở khoá key Tailscale thất bại: {payload}")
+
+    def unlock_active(self, then=None) -> bool:
+        """If the active row holds an unlock code, unlock it and run `then`
+        afterwards; True means the caller must wait for that."""
+        if not self._rows:
+            return False
+        idx = self._active_idx.get()
+        rec = self._rows[idx if idx < len(self._rows) else 0]
+        if not rec["busy"][0] and not self._row_code(rec):
+            return False
+        rec["then"][0] = then
+        if rec["busy"][0]:
+            self._show_msg("⏳  Đang mở khoá key Tailscale… (xong sẽ tự chạy tiếp)",
+                           C["warn"])
+            return True
+        return self._try_unlock(rec)
 
     def remove_active(self):
         if len(self._rows) <= 1:
@@ -245,6 +519,7 @@ class ServerList(tk.Frame):
         idx = self._active_idx.get()
         if idx >= len(self._rows):
             idx = 0
+        self._forget_row(self._rows[idx])
         self._rows[idx]["frame"].destroy()
         self._rows.pop(idx)
         for i, r in enumerate(self._rows):
@@ -273,12 +548,23 @@ class ServerList(tk.Frame):
         if idx >= len(self._rows):
             idx = 0
         r = self._rows[idx]
-        return "" if r["k_is_ph"][0] else r["ke"].get().strip()
+        if r["vault"][0]:
+            return r["vault"][0]
+        if r["k_is_ph"][0] or self._row_code(r):
+            return ""                       # an unlock code is never a key
+        return r["ke"].get().strip()
+
+    def _saved_key(self, r) -> str:
+        # Neither the unlocked shared key nor an unlock code goes to servers.json
+        if r["k_is_ph"][0] or r["vault"][0]:
+            return ""
+        text = r["ke"].get().strip()
+        return "" if normalize_code(text) else text
 
     def get_all(self) -> list[dict]:
         active = self._active_idx.get()
         return [{"name":   r["ne"].get().strip() or self._auto_name(i),
-                 "key":    "" if r["k_is_ph"][0] else r["ke"].get().strip(),
+                 "key":    self._saved_key(r),
                  "active": i == active}
                 for i, r in enumerate(self._rows)]
 
@@ -286,6 +572,7 @@ class ServerList(tk.Frame):
         # servers.json is user-editable - keep only well-formed rows
         servers = [s for s in servers if isinstance(s, dict)] if isinstance(servers, list) else []
         for r in self._rows:
+            self._forget_row(r)
             r["frame"].destroy()
         self._rows.clear()
         for i, srv in enumerate(servers):
@@ -303,9 +590,19 @@ class ServerList(tk.Frame):
             text="TAILSCALE AUTH KEY" if is_ts else "ZEROTIER NETWORK ID")
         # Update placeholder text in empty key rows
         for r in self._rows:
+            if not is_ts:                           # shared key is Tailscale-only
+                self._cancel_auto(r)
+                r["then"][0] = None
+                if r["vault"][0]:
+                    r["vault"][0] = None
+                    r["k_is_ph"][0] = True
+                    r["ke"].config(fg=self._PH_FG)
             if r["k_is_ph"][0]:
                 r["ke"].delete(0, "end")
                 r["ke"].insert(0, ph)
+            self._mask_code(r)
+        if not is_ts:
+            self._show_msg("", C["text_lo"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -524,7 +821,9 @@ class NovivoCTkApp(ctk.CTk):
             "[INFO]    and adds every one of them to the Administrators group",
             "[INFO] 3. Enables Remote Desktop, opens the firewall on the RDP port",
             "[INFO] 4. Disables Network Level Authentication (NLA)",
-            "[INFO] 5. Blocks sleep, and turns hibernate off permanently",
+            "[INFO] 5. Turns sleep and hibernate off for good (plugged in and on",
+            "[INFO]    battery; lid close does nothing when plugged in), re-applied",
+            "[INFO]    at every boot",
             "[WARNING] 6. If the RDP listener will not start, this machine RESTARTS",
             "[WARNING]    automatically 30 seconds after setup finishes.",
             "[INFO]    A pending restart can be cancelled with:  shutdown /a",
@@ -647,7 +946,8 @@ class NovivoCTkApp(ctk.CTk):
         # ── VPN SERVERS ──────────────────────────────────────────────────────
         self._section_header(left, "VPN SERVERS", C["warn"])
 
-        self._server_list = ServerList(left, self._vpn_method)
+        self._server_list = ServerList(left, self._vpn_method, status_cb=self._set_status,
+                                       log_cb=self._log_write)
         self._server_list.pack(fill="x", padx=14, pady=(4, 0))
 
         # Load saved servers or add default row
@@ -665,7 +965,7 @@ class NovivoCTkApp(ctk.CTk):
 
         # Dynamic VPN mode hint
         self._vpn_hint = tk.Label(
-            left, text="ℹ  Tailscale: paste tskey-auth-… key for each server",
+            left, text="ℹ  Tailscale: paste a tskey-auth-… key, or type the unlock code",
             bg=C["panel"], fg=C["text_lo"], font=("Segoe UI", 8), anchor="w", padx=18)
         self._vpn_hint.pack(fill="x", pady=(2, 0))
 
@@ -860,7 +1160,7 @@ class NovivoCTkApp(ctk.CTk):
             self._btn_ts.configure(fg_color=C["accent"])
             self._btn_zt.configure(fg_color=C["btn_dim"])
             self._vpn_hint.config(
-                text="ℹ  Tailscale: paste tskey-auth-… key for each server",
+                text="ℹ  Tailscale: paste a tskey-auth-… key, or type the unlock code",
                 fg=C["text_lo"])
         else:
             self._btn_zt.configure(fg_color=C["accent"])
@@ -988,6 +1288,11 @@ class NovivoCTkApp(ctk.CTk):
         method  = self._vpn_method.get()
         users   = self._table.get_users()
 
+        # Unlock code still in the box (START doesn't take focus, so the box may
+        # never have lost it): trade it for the key first, then START resumes.
+        if method == "tailscale" and self._server_list.unlock_active(then=self._start_install):
+            return
+
         # Validate
         if not net_key:
             messagebox.showerror("Validation",
@@ -1028,7 +1333,7 @@ class NovivoCTkApp(ctk.CTk):
                 "and added to local Administrators.\n"
                 "Remote Desktop is enabled, firewall opened.\n"
                 "NLA is disabled.\n"
-                "Hibernate is turned off permanently.\n"
+                "Sleep and hibernate are turned off for good.\n"
                 "If the RDP listener will not start, this\n"
                 "machine restarts itself 30s after setup.\n\n"
                 "Continue?" % (

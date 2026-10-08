@@ -480,6 +480,136 @@ function Install-HomeRdpSupport {
     return $ok
 }
 
+# ── Boot-time services ───────────────────────────────────────────────────────
+function Set-NovivoBootService {
+    # A service this host needs BEFORE anyone logs in: plain Automatic (a delayed
+    # start runs ~2 min after boot, so the login screen comes up unreachable),
+    # network-stack dependency, restart on failure. Read back, never trusted.
+    param([string]$Name)
+    & sc.exe config $Name start= auto 2>&1 | Out-Null
+    & sc.exe config $Name depend= Tcpip/Afd/Nsi 2>&1 | Out-Null
+    & sc.exe failure $Name reset= 86400 actions= restart/5000/restart/10000/restart/10000 2>&1 | Out-Null
+    # `start= auto` should clear the delayed flag; make sure it really is gone
+    try {
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name 'DelayedAutostart' `
+            -Value 0 -Type DWord -Force -ErrorAction Stop
+    } catch { }
+
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
+    $ok  = [bool]($svc -and $svc.StartMode -eq 'Auto' -and -not $svc.DelayedAutoStart)
+    if ($ok) {
+        Write-Output-Box "[OK] Service '$Name': starts with Windows (not delayed) + network dependency + auto-recovery"
+    } elseif ($svc) {
+        $mode = if ($svc.DelayedAutoStart) { "$($svc.StartMode) (delayed)" } else { "$($svc.StartMode)" }
+        Write-Output-Box "[WARNING] Service '$Name' start type is '$mode', expected 'Auto' (not delayed)"
+    } else {
+        Write-Output-Box "[WARNING] Could not read service '$Name' back"
+    }
+    return $ok
+}
+
+# ── Never sleep ──────────────────────────────────────────────────────────────
+# A host that sleeps drops off Tailscale/ZeroTier and RDP until somebody walks
+# up to it. Applied to EVERY power plan (switching plan must not bring sleep
+# back), plugged in and on battery, and re-applied at every boot by the
+# NOVIVO-KeepAwake task (feature updates are known to reset power plans).
+function Get-NovivoPowerSchemes {
+    # GUIDs only: everything else `powercfg /list` prints is localised.
+    $out = powercfg /list 2>$null | Out-String
+    $ids = [regex]::Matches($out, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}') |
+           ForEach-Object { $_.Value.ToLower() }
+    return @($ids | Select-Object -Unique)
+}
+
+function Get-NovivoPowerValue {
+    # (AC, DC) value of one setting: the last two hex numbers `powercfg /query`
+    # prints. The labels around them are localised, the numbers are not.
+    param([string]$Scheme, [string]$Sub, [string]$Setting)
+    $out = powercfg /query $Scheme $Sub $Setting 2>$null | Out-String
+    $hex = @([regex]::Matches($out, '0x([0-9a-fA-F]{8})') |
+             ForEach-Object { [Convert]::ToUInt32($_.Groups[1].Value, 16) })
+    if ($hex.Count -lt 2) { return $null }
+    return ,@($hex[$hex.Count - 2], $hex[$hex.Count - 1])
+}
+
+function Set-NovivoNoSleep {
+    # DC = $null leaves the battery value alone: on battery a closed lid should
+    # still sleep (laptop in a bag), but it never sleeps on its own.
+    $settings = @(
+        @{ Sub = 'SUB_SLEEP';   Set = 'STANDBYIDLE';   AC = 0; DC = 0 }       # sleep after: never
+        @{ Sub = 'SUB_SLEEP';   Set = 'HIBERNATEIDLE'; AC = 0; DC = 0 }       # hibernate after: never
+        @{ Sub = 'SUB_SLEEP';   Set = '7bc4a2f9-d8fc-4469-b07b-33eb785aaca0'; AC = 0; DC = 0 }  # unattended sleep timeout
+        @{ Sub = 'SUB_BUTTONS'; Set = 'LIDACTION';     AC = 0; DC = $null }   # lid closed, plugged in: do nothing
+        @{ Sub = 'SUB_NONE';    Set = 'f15576e8-98b7-4186-b944-eafa664402d9'; AC = 1; DC = $null }  # network stays on in Modern Standby
+        @{ Sub = '19cbb8fa-5279-450e-9fac-8a3d5fedd0c1'; Set = '12bbebe6-58d6-4636-95bb-3217ef867c1a'; AC = 0; DC = $null }  # Wi-Fi power saving: max performance
+        @{ Sub = '2a737441-1930-4402-8d77-b2bebba308a3'; Set = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'; AC = 0; DC = $null }  # USB selective suspend: off
+    )
+    $schemes = @(Get-NovivoPowerSchemes)
+    foreach ($s in $schemes) {
+        foreach ($p in $settings) {
+            # Settings a machine lacks (no Modern Standby, no Wi-Fi) just fail
+            powercfg /setacvalueindex $s $p.Sub $p.Set $p.AC 2>$null | Out-Null
+            if ($null -ne $p.DC) { powercfg /setdcvalueindex $s $p.Sub $p.Set $p.DC 2>$null | Out-Null }
+        }
+    }
+    powercfg /setactive SCHEME_CURRENT 2>$null | Out-Null   # make the active plan re-read its values
+    # Hibernate off also removes Fast Startup (a half-hibernate). An update can
+    # flip the Fast Startup flag back on, so clear it explicitly too.
+    powercfg /hibernate off 2>$null | Out-Null
+    try {
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' `
+            -Name 'HiberbootEnabled' -Value 0 -Type DWord -Force -ErrorAction Stop
+    } catch { }
+
+    # Judge by the plan actually in use, read back - a Group Policy can override
+    $v  = Get-NovivoPowerValue -Scheme 'SCHEME_CURRENT' -Sub 'SUB_SLEEP' -Setting 'STANDBYIDLE'
+    $ok = [bool]($null -ne $v -and $v[0] -eq 0 -and $v[1] -eq 0)
+    if ($ok) {
+        Write-Output-Box "[OK] Sleep turned off permanently ($($schemes.Count) power plan(s)): never sleeps or hibernates, plugged in or on battery; closing the lid while plugged in does nothing"
+    } else {
+        $got = if ($v) { "AC=$($v[0])s DC=$($v[1])s" } else { 'unreadable' }
+        Write-Output-Box "[WARNING] 'Never sleep' did not stick on the active power plan ($got) - a Group Policy may be managing power settings"
+    }
+    return $ok
+}
+
+function Get-NovivoKeepAwakeScript {
+    # The boot-time script is built from the functions above, so the install
+    # and every later boot apply exactly the same settings.
+    $fns = foreach ($n in 'Get-NovivoPowerSchemes', 'Get-NovivoPowerValue', 'Set-NovivoNoSleep') {
+        "function $n {$((Get-Item "function:$n").Definition)}"
+    }
+    return @"
+# NOVIVO keep-awake - re-applies 'never sleep' at every boot (runs as SYSTEM).
+# Generated by NOVIVO Remote Desktop from NOVIVO-Backend.ps1 - do not edit.
+`$Log = "`$env:ProgramData\NOVIVO\keep-awake.log"
+function Write-Output-Box { param([string]`$Message, [string]`$Color) "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  `$Message" | Add-Content -Path `$Log }
+
+$($fns -join "`r`n`r`n")
+
+[void](Set-NovivoNoSleep)
+"@
+}
+
+function Register-NovivoKeepAwakeTask {
+    $dir = "$env:ProgramData\NOVIVO"
+    try {
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $path = Join-Path $dir 'Keep-Awake.ps1'
+        Set-Content -Path $path -Value (Get-NovivoKeepAwakeScript) -Encoding UTF8 -Force
+        $taskName = 'NOVIVO-KeepAwake'
+        schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
+        $ps  = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $cmd = "`"$ps`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$path`""
+        & schtasks.exe /Create /TN $taskName /TR $cmd /SC ONSTART /RU SYSTEM /RL HIGHEST /F 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output-Box "[OK] Keep-awake task registered: 'never sleep' is re-applied at every boot"
+        } else {
+            Write-Output-Box "[WARNING] Could not register keep-awake task (schtasks exit $LASTEXITCODE)"
+        }
+    } catch { Write-Output-Box "[WARNING] Keep-awake task: $($_.Exception.Message)" }
+}
+
 # Dry run: report what this Windows supports and change nothing.
 if ($PreflightOnly) {
     $osi = Get-NovivoOSInfo
@@ -523,8 +653,9 @@ if ($_powerLoaded) {
     # Use decimal literals - PS5.1 parses 0x80000000 as negative Int32 which fails UInt32 cast
     [void][Win32.NovivoPower]::SetThreadExecutionState([uint32]2147483648 -bor [uint32]1 -bor [uint32]64)
 }
-powercfg /hibernate off 2>$null | Out-Null
-Write-Output-Box "[INFO] Sleep blocked during setup; hibernate turned off permanently (an RDP host must stay reachable)"
+# ...and for good: an RDP host that sleeps is unreachable (re-applied at every boot)
+[void](Set-NovivoNoSleep)
+Register-NovivoKeepAwakeTask
 
 try {
     $rdpWorking = $false
@@ -598,9 +729,20 @@ try {
                 # Certificate validation stays ON: this downloads an installer that is
                 # then run with admin rights, so an unverified peer is a code-exec hole.
 
+                # tailscale-setup-latest.exe hien la BO CAI WEB (stub) chi ~1.4 MB: no tai
+                # phan con lai luc chay. Uu tien ban offline de cai duoc tren may mang yeu,
+                # va de kiem tra tinh toan ven bang kich thuoc + header.
+                $tsArch = switch ($env:PROCESSOR_ARCHITECTURE) {
+                    'ARM64' { 'arm64' }
+                    'x86'   { if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'x86' } }
+                    default { 'amd64' }
+                }
                 $tsUrls = @(
-                    "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+                    "https://pkgs.tailscale.com/stable/tailscale-setup-latest-$tsArch.msi",  # offline ~38 MB
+                    "https://pkgs.tailscale.com/stable/tailscale-setup-full-latest.exe",     # offline ~113 MB
+                    "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"           # stub ~1.4 MB
                 )
+                Write-Output-Box "[INFO] Kien truc: $tsArch"
 
                 foreach ($tsUrl in $tsUrls) {
                     try {
@@ -612,7 +754,7 @@ try {
                         $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                         $wc.DownloadFile($tsUrl, $tsInstallerPath)
                         $tsFileOk = $false
-                        if ((Test-Path $tsInstallerPath) -and (Get-Item $tsInstallerPath).Length -gt 5MB) {
+                        if ((Test-Path $tsInstallerPath) -and (Get-Item $tsInstallerPath).Length -gt 1MB) {
                             $tsBytes = [System.IO.File]::ReadAllBytes($tsInstallerPath)
                             # EXE: MZ header; MSI: D0 CF 11 E0 (OLE2) or just skip header check for MSI
                             $tsValidHeader = ($tsExt -eq '.exe' -and $tsBytes[0] -eq 0x4D -and $tsBytes[1] -eq 0x5A) -or
@@ -622,7 +764,7 @@ try {
                                 $tsDownloaded = $true
                                 $tsFileOk = $true
                             } else { Write-Output-Box "Invalid file header, skipping..." }
-                        } else { Write-Output-Box "File too small (<5 MB), skipping..." }
+                        } else { Write-Output-Box "File qua nho (<1 MB) - co le la trang loi, bo qua..." }
                         if ($tsFileOk) { break }
                     }
                     catch {
@@ -631,7 +773,7 @@ try {
                             $tsExt2 = if ($tsUrl -match '\.msi$') { '.msi' } else { '.exe' }
                             $tsInstallerPath = "$env:TEMP\TailscaleSetup$tsExt2"
                             Invoke-WebRequest -Uri $tsUrl -OutFile $tsInstallerPath -UseBasicParsing -TimeoutSec 180
-                            if ((Test-Path $tsInstallerPath) -and (Get-Item $tsInstallerPath).Length -gt 5MB) {
+                            if ((Test-Path $tsInstallerPath) -and (Get-Item $tsInstallerPath).Length -gt 1MB) {
                                 $tsBytes2 = [System.IO.File]::ReadAllBytes($tsInstallerPath)
                                 $tsVH2 = ($tsExt2 -eq '.exe' -and $tsBytes2[0] -eq 0x4D -and $tsBytes2[1] -eq 0x5A) -or
                                          ($tsExt2 -eq '.msi' -and $tsBytes2[0] -eq 0xD0 -and $tsBytes2[1] -eq 0xCF)
@@ -743,28 +885,38 @@ try {
             Write-Output-Box ""
             Write-Output-Box "[INFO] Configuring Tailscale user-session autostart..."
 
-            # Method 1: All-Users Startup folder (fallback for after login)
-            try {
-                $tsTrayExe = $null
-                $tsTrayPaths = @(
-                    "$env:ProgramFiles\Tailscale\Tailscale.exe",
-                    'C:\Program Files (x86)\Tailscale\Tailscale.exe'
-                )
-                foreach ($tp in $tsTrayPaths) { if (Test-Path $tp) { $tsTrayExe = $tp; break } }
+            # Only the tray app (tailscale-ipn.exe) belongs here. tailscale.exe is
+            # the console CLI: started at logon it just flashes a console window,
+            # and as "Tailscale.lnk" it overwrote the installer's own tray
+            # shortcut. Old installs did exactly that - repair them too.
+            $tsAllUsersStartup = [System.Environment]::GetFolderPath('CommonStartup')
+            if (-not $tsAllUsersStartup) {
+                $tsAllUsersStartup = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+            }
+            $tsLnkPath = Join-Path $tsAllUsersStartup "Tailscale.lnk"
+            $tsRunPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 
+            $tsTrayExe = $null
+            foreach ($tp in @((Join-Path (Split-Path $tsCliPath) 'tailscale-ipn.exe'),
+                              "$env:ProgramFiles\Tailscale\tailscale-ipn.exe",
+                              'C:\Program Files (x86)\Tailscale\tailscale-ipn.exe')) {
+                if (Test-Path $tp) { $tsTrayExe = $tp; break }
+            }
+
+            # Method 1: All-Users Startup folder
+            try {
+                $tsShell = New-Object -ComObject WScript.Shell
                 if ($tsTrayExe) {
-                    $tsAllUsersStartup = [System.Environment]::GetFolderPath('CommonStartup')
-                    if (-not $tsAllUsersStartup) {
-                        $tsAllUsersStartup = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
-                    }
-                    $tsLnkPath = Join-Path $tsAllUsersStartup "Tailscale.lnk"
-                    $tsShell   = New-Object -ComObject WScript.Shell
-                    $tsLnk     = $tsShell.CreateShortcut($tsLnkPath)
+                    $tsLnk = $tsShell.CreateShortcut($tsLnkPath)
                     $tsLnk.TargetPath       = $tsTrayExe
                     $tsLnk.WorkingDirectory = Split-Path $tsTrayExe
                     $tsLnk.Description      = "Tailscale autostart"
                     $tsLnk.Save()
-                    Write-Output-Box "[OK] Tailscale shortcut added to All-Users Startup folder"
+                    Write-Output-Box "[OK] Tailscale tray app added to All-Users Startup folder"
+                } elseif ((Test-Path $tsLnkPath) -and
+                          ($tsShell.CreateShortcut($tsLnkPath).TargetPath -match '\\tailscale\.exe$')) {
+                    Remove-Item $tsLnkPath -Force -ErrorAction SilentlyContinue
+                    Write-Output-Box "[OK] Removed old Startup shortcut that launched the console CLI"
                 }
             } catch {
                 Write-Output-Box "[WARNING] Startup folder: $($_.Exception.Message)"
@@ -772,18 +924,19 @@ try {
 
             # Method 4: HKLM Run key (machine-wide, any user session)
             try {
-                $tsRunExe = if ($tsCliPath) { $tsCliPath } else { 'tailscale.exe' }
-                Set-ItemProperty `
-                    -Path  "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" `
-                    -Name  "TailscaleAutostart" `
-                    -Value "`"$tsRunExe`"" `
-                    -Type  String -Force
-                Write-Output-Box "[OK] HKLM Run key set for Tailscale"
+                if ($tsTrayExe) {
+                    Set-ItemProperty -Path $tsRunPath -Name "TailscaleAutostart" `
+                        -Value "`"$tsTrayExe`"" -Type String -Force
+                    Write-Output-Box "[OK] HKLM Run key set for the Tailscale tray app"
+                } else {
+                    Remove-ItemProperty -Path $tsRunPath -Name "TailscaleAutostart" -ErrorAction SilentlyContinue
+                    Write-Output-Box "[INFO] Tailscale tray app not found - skipped (the service does not need it)"
+                }
             } catch {
                 Write-Output-Box "[WARNING] HKLM Run key: $($_.Exception.Message)"
             }
 
-            Write-Output-Box "[OK] Tailscale user-session autostart configured (Startup folder + Run key)"
+            Write-Output-Box "[OK] Tailscale user-session autostart configured (tray app; the VPN itself runs as a service)"
 
             # TS-STEP 3: Connect / bring up Tailscale
             Write-Output-Box ''
@@ -1120,13 +1273,10 @@ try {
                 # 1. Set Tailscale service to Automatic + network dependency + recovery restart
                 $tsSvcName2 = Get-Service -DisplayName '*Tailscale*' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Name
                 if (-not $tsSvcName2) { $tsSvcName2 = 'Tailscale' }
-                # Startup type: Automatic (delayed)  -  starts after network ready
-                & sc.exe config $tsSvcName2 start= delayed-auto 2>&1 | Out-Null
-                # Network stack dependency
-                & sc.exe config $tsSvcName2 depend= Tcpip/Afd/Nsi 2>&1 | Out-Null
-                # Recovery: restart service on 1st, 2nd, subsequent failures (reset counter every 86400s)
-                & sc.exe failure $tsSvcName2 reset= 86400 actions= restart/5000/restart/10000/restart/10000 2>&1 | Out-Null
-                Write-Output-Box "[OK] Tailscale service: delayed-auto + network dependency + auto-recovery set"
+                # Plain Automatic, NOT delayed: the node must already be up while
+                # the machine still sits at the login screen. --unattended (step 3)
+                # is what keeps it connected with nobody logged in.
+                [void](Set-NovivoBootService -Name $tsSvcName2)
 
                 # 2. Save auth key to disk (used as fallback if node state is lost)
                 $tsScriptDir = "$env:ProgramData\Tailscale"

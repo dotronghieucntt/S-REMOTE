@@ -63,6 +63,9 @@ function Get-CimInstance {
         return $global:__N.OS
     }
     if ($cls -match 'Win32_Service') {
+        if ($Filter -match "Name='([^']+)'" -and $global:__N.Services.ContainsKey($Matches[1])) {
+            return $global:__N.Services[$Matches[1]]
+        }
         if ($null -eq $global:__N.TermServicePid) { if ($ErrorAction -eq 'Stop') { throw 'no svc' } else { return $null } }
         return [pscustomobject]@{ Name='TermService'; ProcessId=$global:__N.TermServicePid }
     }
@@ -85,6 +88,69 @@ function Get-Process {
     }
     if ($ErrorAction -eq 'SilentlyContinue') { return $null }
     throw "no such process $Id"
+}
+
+function Set-ItemProperty {
+    param([string]$Path,[string]$Name,$Value,$Type,[switch]$Force,$ErrorAction)
+    $global:__N.Reg["$Path|$Name"] = $Value
+}
+
+# sc.exe: only `config <svc> start= <mode>` changes the simulated service.
+# ScIgnored simulates a policy/ACL that makes sc.exe silently change nothing.
+function sc.exe {
+    $a = @($args | ForEach-Object { "$_" })
+    $global:__N.ScCalls.Add(($a -join ' ')) | Out-Null
+    if ($a.Count -ge 4 -and $a[0] -eq 'config' -and $a[2] -eq 'start=' -and -not $global:__N.ScIgnored) {
+        $svc = $global:__N.Services[$a[1]]
+        if ($svc) {
+            switch ($a[3]) {
+                'auto'         { $svc.StartMode = 'Auto';   $svc.DelayedAutoStart = $false }
+                'delayed-auto' { $svc.StartMode = 'Auto';   $svc.DelayedAutoStart = $true }
+                'demand'       { $svc.StartMode = 'Manual'; $svc.DelayedAutoStart = $false }
+            }
+        }
+    }
+    $global:LASTEXITCODE = 0
+}
+
+# powercfg: schemes + per-(scheme,subgroup,setting,AC|DC) values. Output text
+# can be English or Vietnamese - the code under test must only rely on GUIDs
+# and hex numbers. Locked simulates a Group Policy that ignores writes.
+function powercfg {
+    $a = @($args | ForEach-Object { "$_" })
+    $global:__N.PowerCalls.Add(($a -join ' ')) | Out-Null
+    $P  = $global:__N.Power
+    $vi = ($P.Lang -eq 'vi')
+    $global:LASTEXITCODE = 0
+    $k  = { param($s,$sub,$set,$m) "$($s.ToLower())|$sub|$($set.ToLower())|$m" }
+    switch ($a[0]) {
+        '/list' {
+            if ($vi) { 'Luoc do nguon dien hien co (* Dang hoat dong)' } else { 'Existing Power Schemes (* Active)' }
+            '-----------------------------------'
+            foreach ($s in $P.Schemes) {
+                $lbl = if ($vi) { 'GUID luoc do nguon dien' } else { 'Power Scheme GUID' }
+                "${lbl}: $s  (Plan)" + $(if ($s -eq $P.Active) { ' *' } else { '' })
+            }
+        }
+        '/setacvalueindex' { if (-not $P.Locked) { $P.V[(& $k $a[1] $a[2] $a[3] 'AC')] = [uint32]$a[4] } }
+        '/setdcvalueindex' { if (-not $P.Locked) { $P.V[(& $k $a[1] $a[2] $a[3] 'DC')] = [uint32]$a[4] } }
+        '/setactive'       { }
+        '/hibernate'       { $P.Hibernate = ($a[1] -ne 'off') }
+        '/query' {
+            $s  = if ($a[1] -eq 'SCHEME_CURRENT') { $P.Active } else { $a[1] }
+            $ac = $P.V[(& $k $s $a[2] $a[3] 'AC')]; if ($null -eq $ac) { $ac = 1800 }   # Windows default: 30 min
+            $dc = $P.V[(& $k $s $a[2] $a[3] 'DC')]; if ($null -eq $dc) { $dc = 900 }
+            $acL = if ($vi) { 'Chi muc cai dat nguon AC hien tai' } else { 'Current AC Power Setting Index' }
+            $dcL = if ($vi) { 'Chi muc cai dat nguon DC hien tai' } else { 'Current DC Power Setting Index' }
+            "Power Scheme GUID: $s  (Plan)"
+            "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)"
+            "      Minimum Possible Setting: 0x00000000"
+            "      Maximum Possible Setting: 0xffffffff"
+            "      Possible Settings increment: 0x00000001"
+            ("    {0}: 0x{1:x8}" -f $acL, $ac)
+            ("    {0}: 0x{1:x8}" -f $dcL, $dc)
+        }
+    }
 }
 '@
 
@@ -109,7 +175,10 @@ function Invoke-NovivoScenario {
     )
     $global:__N = @{
         Reg=@{}; OS=$null; Listeners=@(); TermServicePid=$null; TermServiceModules=@()
+        Services=@{}; ScIgnored=$false; Power=@{ Schemes=@(); Active=$null; V=@{}; Hibernate=$true; Locked=$false; Lang='en' }
         Log=(New-Object System.Collections.Generic.List[string])
+        ScCalls=(New-Object System.Collections.Generic.List[string])
+        PowerCalls=(New-Object System.Collections.Generic.List[string])
     }
     foreach ($k in $Machine.Keys) { $global:__N[$k] = $Machine[$k] }
 

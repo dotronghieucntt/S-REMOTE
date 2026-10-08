@@ -7,6 +7,9 @@
     .\Build-Release.ps1               # normal build
     .\Build-Release.ps1 -SkipGitHub  # build only, skip git push
     .\Build-Release.ps1 -BumpType minor   # bump minor version (default: patch)
+
+    Doc truoc: BUILD.md. Moi thu ve dong goi (import, thu vien, file di kem, icon,
+    version resource) nam trong NOVIVO-RemoteDesktop.spec - script nay chi dieu phoi.
 #>
 param(
     [switch]$SkipGitHub,
@@ -85,30 +88,12 @@ $minor      = [int]$parts[1]
 $patch      = [int]$parts[2]
 Write-Host "[OK] Current version: $verCurrent"
 
-# --- 2. Convert logo PNG → icon.ico ------------------------------------------
-Write-Step "2/7  Generating icon.ico from LOGO KO CHU.png"
-$iconScript = @"
-from PIL import Image
-import os
-src = os.path.join(r'$ROOT', 'LOGO KO CHU.png')
-dst = os.path.join(r'$ROOT', 'icon.ico')
-img = Image.open(src).convert('RGBA')
-# Generate standard Windows icon sizes
-sizes = [(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)]
-imgs = [img.resize(s, Image.LANCZOS) for s in sizes]
-imgs[0].save(dst, format='ICO', sizes=sizes, append_images=imgs[1:])
-print(f'[OK] icon.ico written ({os.path.getsize(dst)//1024} KB)')
-"@
-& $PYTHON -c $iconScript
-if ($LASTEXITCODE -ne 0) { throw "Icon conversion failed" }
+# icon.ico (du co 16-256) va version resource gio do spec tu tao trong build_tmp/.
+# Truoc day 2 buoc nay chay O DAY, roi buoc don dep xoa mat build_tmp/version_info.txt
+# -> exe v1.0.0-v1.0.18 khong co version resource, icon chi co co 16px.
 
-# --- 3. Generate Windows version resource ------------------------------------
-Write-Step "3/7  Generating Windows version resource"
-& $PYTHON (Join-Path $ROOT "version_info.py")
-if ($LASTEXITCODE -ne 0) { throw "version_info.py failed" }
-
-# --- 4. Clean previous build artifacts ---------------------------------------
-Write-Step "4/7  Cleaning previous build artifacts"
+# --- 2. Clean previous build artifacts ---------------------------------------
+Write-Step "2/7  Cleaning previous build artifacts"
 # Kill any running NOVIVO EXE that may be locking dist/ files
 Get-Process | Where-Object { $_.Name -like "*NOVIVO*" } |
     ForEach-Object { Write-Host "  Stopping: $($_.Name)"; Stop-Process $_ -Force -ErrorAction SilentlyContinue }
@@ -123,8 +108,8 @@ foreach ($d in @("build_tmp", "dist")) {
     }
 }
 
-# --- 5. Run PyInstaller with spec --------------------------------------------
-Write-Step "5/7  Building with PyInstaller (onefile + onedir)"
+# --- 3. Run PyInstaller with spec --------------------------------------------
+Write-Step "3/7  Building with PyInstaller (onefile + onedir)"
 $spec       = Join-Path $ROOT "NOVIVO-RemoteDesktop.spec"
 $distPath   = Join-Path $ROOT "dist"
 $buildPath  = Join-Path $ROOT "build_tmp"
@@ -136,10 +121,63 @@ $buildPath  = Join-Path $ROOT "build_tmp"
     --clean `
     $spec
 
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed (exit $LASTEXITCODE)" }
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed (exit $LASTEXITCODE) - xem dong [spec] DUNG BUILD o tren" }
 
-# --- 6. Stage release outputs ------------------------------------------------
-Write-Step "6/7  Staging release outputs"
+# --- 4. Self-test: chay chinh exe vua build -----------------------------------
+# Runtime hook pyi_hooks/pyi_rth_selftest.py: exe goi kem --selftest thi import du
+# module app dung, kiem file di kem, Tcl/Tk, SSL roi THOAT (app khong chay).
+# __COMPAT_LAYER=RunAsInvoker de khong hien hop UAC (manifest doi admin).
+# Hong thi xoa dist/: landing server remote.novivo.net doc ca dist/, khong duoc de
+# ban hong nam do. (v1.0.18 tung len trang voi loi "No module named 'email'".)
+Write-Step "4/7  Self-testing the built EXEs"
+
+function Invoke-SelfTest([string]$exePath) {
+    $out  = Join-Path $buildPath ("selftest-" + [guid]::NewGuid().ToString("N") + ".json")
+    $prev = $env:__COMPAT_LAYER
+    $env:__COMPAT_LAYER = "RunAsInvoker"
+    try {
+        $p = Start-Process -FilePath $exePath -ArgumentList @("--selftest", "`"$out`"") -PassThru
+    } finally {
+        $env:__COMPAT_LAYER = $prev
+    }
+    if (-not $p.WaitForExit(120000)) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        return @{ ok = $false; errors = @("treo qua 120 giay (co the dang hien hop traceback)") }
+    }
+    if (-not (Test-Path $out)) {
+        return @{ ok = $false; errors = @("khong co ket qua (exit $($p.ExitCode)) - exe chet truoc khi runtime hook chay") }
+    }
+    return (Get-Content $out -Raw -Encoding UTF8 | ConvertFrom-Json)
+}
+
+$appName  = "NOVIVO Remote Desktop v$verCurrent"
+$stFailed = @()
+foreach ($t in @(
+    @{ Label = "EXE";  Path = (Join-Path $distPath "$appName.exe") },
+    @{ Label = "Full"; Path = (Join-Path (Join-Path $distPath "$appName (Full)") "$appName.exe") }
+)) {
+    if (-not (Test-Path $t.Path)) { $stFailed += "$($t.Label): khong thay $($t.Path)"; continue }
+    $r = Invoke-SelfTest $t.Path
+    if ($r.ok) {
+        Write-Host "[OK] $($t.Label) self-test: $($r.checked.imports) module, $($r.checked.files) file, Tk $($r.checked.tk)"
+        $net = $r.checked.PSObject.Properties["net"]
+        if ($net) { Write-Host "     mang: $($net.Value)" }
+    } else {
+        foreach ($e in $r.errors) { $stFailed += "$($t.Label): $e" }
+    }
+}
+if ($stFailed.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  ================= SELF-TEST HONG =================" -ForegroundColor Red
+    $stFailed | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+    Write-Host "  Da xoa dist/ de ban hong khong len trang tai ve." -ForegroundColor Yellow
+    Write-Host "  ==================================================" -ForegroundColor Red
+    Remove-Item $distPath -Recurse -Force -ErrorAction SilentlyContinue
+    throw "Self-test failed - build khong duoc phat hanh."
+}
+
+# --- 5. Stage release outputs ------------------------------------------------
+Write-Step "5/7  Staging release outputs"
 $relDir = Join-Path (Join-Path $ROOT "releases") "v$verCurrent"
 New-Item -ItemType Directory -Path $relDir -Force | Out-Null
 
@@ -180,6 +218,60 @@ if (Test-Path $onefile) {
     Write-Host "[OK] Quick-access EXE placed in workspace root"
 }
 
+# --- 6.5 Secret scan (BAT BUOC truoc khi phat hanh) --------------------------
+# Cac ban v1.0.0 - v1.0.15 tung nhung thang mot Tailscale auth key vao EXE, tuc la
+# ai tai cung co chia khoa vao mang rieng. Quet truoc khi phat hanh, khong tin tri nho.
+Write-Step "6/7  Scanning artifacts for embedded secrets"
+
+$secretPatterns = @(
+    @{ Name = "Tailscale auth key";  Pattern = "tskey-[a-zA-Z]+-[A-Za-z0-9\-]{10,}" },
+    @{ Name = "GitHub token";        Pattern = "gh[pousr]_[A-Za-z0-9]{20,}" },
+    @{ Name = "GitHub fine-grained"; Pattern = "github_pat_[A-Za-z0-9_]{20,}" }
+)
+
+function Test-FileForSecrets {
+    param([string]$Path)
+    $found = @()
+    if (-not (Test-Path $Path)) { return $found }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $text  = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)   # latin1: giu nguyen byte
+    foreach ($p in $secretPatterns) {
+        if ([regex]::IsMatch($text, $p.Pattern)) { $found += $p.Name }
+    }
+    return ,$found
+}
+
+$dirty = @()
+foreach ($f in @(
+    (Join-Path $relDir "$appName.exe"),
+    (Join-Path $relDir "$appName (Full).zip")
+)) {
+    $hits = Test-FileForSecrets -Path $f
+    if ($hits.Count -gt 0) {
+        $dirty += "$([System.IO.Path]::GetFileName($f)) -> $($hits -join ', ')"
+    }
+}
+# ZIP nen nen chuoi khong lo ra khi quet tho: quet luon thu muc onedir goc
+if (Test-Path $dst) {
+    foreach ($f in (Get-ChildItem $dst -Recurse -File -Include *.exe,*.json,*.ps1,*.txt -EA SilentlyContinue)) {
+        $hits = Test-FileForSecrets -Path $f.FullName
+        if ($hits.Count -gt 0) { $dirty += "$($f.Name) (trong Full) -> $($hits -join ', ')" }
+    }
+}
+
+if ($dirty.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  ================= DUNG PHAT HANH =================" -ForegroundColor Red
+    Write-Host "  Goi cai dat co nhung bi mat, KHONG duoc phat hanh:" -ForegroundColor Red
+    $dirty | Sort-Object -Unique | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "  Xu ly: thu hoi key da lo, xoa gia tri hardcode trong source," -ForegroundColor Yellow
+    Write-Host "  build lai, roi chay lai script nay." -ForegroundColor Yellow
+    Write-Host "  ==================================================" -ForegroundColor Red
+    throw "Secret scan failed - build khong duoc phat hanh."
+}
+Write-Host "[OK] Khong tim thay bi mat nao trong goi phat hanh"
+
 # --- 7. Bump version ---------------------------------------------------------
 Write-Step "7/7  Bumping version ($BumpType)"
 switch ($BumpType) {
@@ -205,6 +297,9 @@ if (-not $SkipGitHub) {
         git add NOVIVO-App.py
         git add NOVIVO-Backend.ps1
         git add NOVIVO-AlwaysAdmin.ps1
+        git add pyi_hooks/
+        git add BUILD.md
+        git add CLAUDE.md
         git add "LOGO KO CHU.png"
         git add "NEN DEN.png"
         git add releases/
