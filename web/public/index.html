@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NOVIVO Remote Desktop — Bật điều khiển từ xa cho máy Windows trong một lần bấm</title>
+<meta name="description" content="Công cụ tự cài Tailscale, bật RDP đúng cách, tạo tài khoản và kiểm chứng kết nối. Không mở cổng 3389 ra Internet, không cần IP tĩnh, không cần port forward. Chạy được cả trên Windows Home.">
+<meta name="theme-color" content="#0A0C1C">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/assets/logo.png">
+<link rel="canonical" href="https://remote.novivo.net/">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="NOVIVO Remote Desktop">
+<meta property="og:title" content="NOVIVO Remote Desktop — điều khiển máy Windows từ xa, an toàn, một lần bấm">
+<meta property="og:description" content="Tailscale + RDP cấu hình chuẩn, kiểm chứng listener thật, tự phục hồi sau Windows Update. Không mở cổng ra Internet.">
+<meta property="og:url" content="https://remote.novivo.net/">
+<meta property="og:image" content="https://remote.novivo.net/assets/logo-512.png">
+<meta property="og:locale" content="vi_VN">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css?v=20260904c">
+</head>
+<body>
+
+<a class="skip" href="#noi-dung">Bỏ qua tới nội dung chính</a>
+
+<!-- ══════════════════════════ NAV ══════════════════════════ -->
+<header class="nav" id="nav">
+  <div class="wrap nav__inner">
+    <a class="brand" href="#top" aria-label="NOVIVO Remote Desktop — trang chủ">
+      <img class="brand__logo" src="/assets/logo.png" alt="" width="34" height="34">
+      <span class="brand__text"><strong>NOVIVO</strong> Remote<span class="brand__pp"> Desktop</span></span>
+    </a>
+
+    <nav class="nav__links" aria-label="Điều hướng chính">
+      <a href="#tinh-nang">Tính năng</a>
+      <a href="#cach-dung">Cách dùng</a>
+      <a href="#quy-trinh">Quy trình</a>
+      <a href="#bao-mat">Bảo mật</a>
+      <a href="#ban-quyen">Bản quyền</a>
+      <a href="#hoi-dap">Hỏi đáp</a>
+    </nav>
+
+    <a class="btn btn--primary btn--sm" href="/download-full" data-dl>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v9m0 0L4.5 6.5M8 10l3.5-3.5M2 13h12"/></svg>
+      Tải về
+    </a>
+
+    <button class="nav__burger" id="burger" aria-label="Mở menu" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</header>
+
+<main id="noi-dung">
+
+<!-- ══════════════════════════ HERO ══════════════════════════ -->
+<section class="hero" id="top">
+  <div class="hero__glow" aria-hidden="true"></div>
+  <div class="hero__grid-bg" aria-hidden="true"></div>
+
+  <div class="wrap hero__inner">
+    <div class="hero__copy">
+      <div class="pill">
+        <span class="pill__dot"></span>
+        Bản <span data-version>v1.0.15</span> · Chạy trực tiếp, cần quyền Administrator
+      </div>
+
+      <h1 class="hero__title">
+        Máy Windows nào cũng thành<br>
+        máy <span class="grad">điều khiển từ xa</span>.
+      </h1>
+
+      <p class="hero__lead">
+        <strong>NOVIVO Remote Desktop</strong> làm hộ bạn toàn bộ phần khó: dựng mạng riêng Tailscale,
+        bật Remote Desktop đúng trình tự registry — dịch vụ — tường lửa, tạo sẵn tài khoản đăng nhập,
+        rồi tự kiểm chứng cổng đã thật sự lắng nghe trước khi báo xong.
+        <strong>Không mở cổng 3389 ra Internet</strong>, không cần IP tĩnh, không đụng vào router.
+      </p>
+
+      <div class="hero__cta">
+        <a class="btn btn--primary btn--lg" href="/download-full" data-dl>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v9m0 0L4.5 6.5M8 10l3.5-3.5M2 13h12"/></svg>
+          Tải bản Full (.zip)
+          <span class="btn__meta" data-size-zip>20.7 MB</span>
+        </a>
+        <a class="btn btn--ghost btn--lg" href="/download" data-dl>
+          Bản EXE gọn
+          <span class="btn__meta" data-size-exe>20.7 MB</span>
+        </a>
+      </div>
+      <p class="hero__hint">Khuyên dùng bản <b>.zip</b>: giải nén rồi chạy, ít bị phần mềm diệt virus báo nhầm hơn bản một-file.</p>
+
+      <ul class="hero__ticks">
+        <li>Windows 10 · 11 · Server</li>
+        <li>Windows Home cũng vào được</li>
+        <li>Không cần port forward</li>
+      </ul>
+    </div>
+
+    <!-- Mô phỏng giao diện ứng dụng -->
+    <div class="hero__app" aria-hidden="true">
+      <div class="app">
+        <div class="app__chrome">
+          <img class="app__icon" src="/assets/logo.png" alt="" width="20" height="20">
+          <div class="app__titles">
+            <div class="app__name">NOVIVO — Remote Desktop Setup Tool</div>
+            <div class="app__sub">● Ready | Running as Administrator</div>
+          </div>
+          <div class="app__dots"><i></i><i></i><i></i></div>
+        </div>
+
+        <div class="app__body">
+          <div class="app__col">
+            <div class="card card--app">
+              <div class="card__cap">Tailscale auth key</div>
+              <div class="combo combo--path">tskey-auth-k7Y…9Fp <em>✕ clear</em></div>
+              <div class="field" style="margin-top:10px">
+                <label>RDP PORT</label>
+                <div class="combo">3389 <em>mặc định</em></div>
+              </div>
+              <div class="tiny">ℹ Tailscale: dán key tskey-auth-… cho từng máy</div>
+            </div>
+
+            <div class="card card--app">
+              <div class="card__cap">Tài khoản đăng nhập</div>
+              <div class="urow"><span>novivo</span><b>••••••••••</b></div>
+              <div class="urow"><span>ketoan</span><b>••••••••••</b></div>
+              <div class="radios" style="margin-top:8px"><span class="on">☑ Show passwords</span></div>
+              <div class="btn-fake btn-fake--accent">▶  START SETUP</div>
+            </div>
+          </div>
+
+          <div class="app__col">
+            <div class="card card--app card--log" style="flex:1">
+              <div class="card__cap">Installation log</div>
+              <div class="log">
+                <p class="ok">[OK] Preflight: Windows 11 Pro build 22631</p>
+                <p><span>STEP 1</span> Tải Tailscale…</p>
+                <p><span>STEP 3</span> tailscale up — đã kết nối</p>
+                <p><span>STEP 4</span> Bật RDP: registry + firewall</p>
+                <p><span>STEP 5</span> Tạo user: novivo, ketoan</p>
+                <p><span>STEP 6</span> Restart TermService…</p>
+                <p class="ok">[OK] Listener 3389 thuộc TermService</p>
+                <p class="ok">[OK] Tailscale IP: 100.96.112.29</p>
+                <p class="ok">✔ HOÀN TẤT — RDP sẵn sàng</p>
+              </div>
+              <div class="app__actions">
+                <div class="btn-fake">COPY LOG</div>
+                <div class="btn-fake">✕  CLOSE</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="app__status">
+          <i></i> Đang chạy — không mở cổng nào ra Internet
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dải số liệu -->
+  <div class="wrap">
+    <div class="stripe">
+      <div class="stripe__item"><b>7 bước</b><span>tự chạy, không thao tác tay</span></div>
+      <div class="stripe__item"><b>0 cổng</b><span>mở ra Internet công cộng</span></div>
+      <div class="stripe__item"><b>WireGuard</b><span>mã hoá đầu-cuối qua Tailscale</span></div>
+      <div class="stripe__item"><b data-downloads>—</b><span>lượt tải từ remote.novivo.net</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ TÍNH NĂNG ══════════════════════════ -->
+<section class="sec" id="tinh-nang">
+  <div class="wrap">
+    <div class="sec__head reveal">
+      <span class="eyebrow">Tính năng</span>
+      <h2>Chỗ nào hay hỏng, chỗ đó được làm kỹ</h2>
+      <p>Bật RDP thì ai cũng biết. Cái khó là làm sao sau khi bật, máy thật sự vào được —
+         và vẫn vào được sau lần Windows Update tới.</p>
+    </div>
+
+    <div class="grid grid--3">
+      <article class="card reveal">
+        <div class="ico ico--blue">
+          <svg viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <h3>Mạng riêng, không phơi cổng ra ngoài</h3>
+        <p>Máy được đưa vào mạng riêng Tailscale (nền WireGuard), nhận địa chỉ 100.x nội bộ.
+           Cổng 3389 chỉ nghe trong mạng riêng đó — Internet công cộng không thấy gì để mà quét.
+           Khỏi IP tĩnh, khỏi NAT port forward, khỏi DDNS.</p>
+      </article>
+
+      <article class="card reveal">
+        <div class="ico ico--green">
+          <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M8 20h8M12 18v2"/></svg>
+        </div>
+        <h3>Bật RDP theo đúng trình tự</h3>
+        <p>Registry (<code>fDenyTSConnections</code>, <code>LocalAccountTokenFilterPolicy</code>),
+           rồi tường lửa, rồi khởi động lại dịch vụ đúng thứ tự
+           SessionEnv → TermService → UmRdpService. Sai thứ tự là listener không bind — lỗi kinh điển
+           khiến người ta phải restart máy.</p>
+      </article>
+
+      <article class="card reveal">
+        <div class="ico ico--violet">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="18" cy="17" r="3"/></svg>
+        </div>
+        <h3>Kiểm chứng listener thật, không đoán</h3>
+        <p>Không dừng ở “port 3389 có mở”. Công cụ soi socket đó có đúng thuộc tiến trình
+           TermService không — vì một phần mềm lạ chiếm cổng cũng làm lệnh kiểm tra thường
+           báo xanh, mà đó lại chính là lý do RDP không vào được.</p>
+      </article>
+
+      <article class="card reveal">
+        <div class="ico ico--amber">
+          <svg viewBox="0 0 24 24"><path d="M4 8h9M17 8h3M4 16h3M11 16h9"/><circle cx="15" cy="8" r="2"/><circle cx="9" cy="16" r="2"/></svg>
+        </div>
+        <h3>Tài khoản đăng nhập tạo sẵn</h3>
+        <p>Khai báo bao nhiêu người dùng cũng được: công cụ tạo tài khoản Windows, sinh mật khẩu
+           ngẫu nhiên đủ mạnh, thêm vào nhóm <em>Remote Desktop Users</em>, và cho bạn xem
+           rồi sao chép ra để lưu lại.</p>
+      </article>
+
+      <article class="card reveal">
+        <div class="ico ico--blue">
+          <svg viewBox="0 0 24 24"><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+        <h3>Kiểm tra máy trước khi cài</h3>
+        <p>Bước tiền kiểm đọc build number thật của Windows (không tin vào tên hiển thị vì bản
+           Windows 11 vẫn khai là “Windows 10”), phát hiện bản Home, bản Server, chế độ S,
+           kiến trúc 32/64-bit — báo ngay nếu máy không chạy được, thay vì tải 20 MB rồi mới chết ở bước 7.</p>
+      </article>
+
+      <article class="card reveal">
+        <div class="ico ico--green">
+          <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+        </div>
+        <h3>Tự đứng dậy sau Windows Update</h3>
+        <p>Bản vá Windows hay đá văng cấu hình RDP. Công cụ đăng ký một tác vụ tự kiểm tra và
+           dựng lại listener, đồng thời đặt Tailscale tự kết nối ngay từ lúc máy khởi động —
+           chưa cần ai đăng nhập máy vẫn vào được.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ CÁCH DÙNG ══════════════════════════ -->
+<section class="sec sec--alt" id="cach-dung">
+  <div class="wrap">
+    <div class="sec__head reveal">
+      <span class="eyebrow">Cách dùng</span>
+      <h2>Bốn bước, xong trong 2–3 phút</h2>
+      <p>Chỉ cần một thứ chuẩn bị trước: một auth key của Tailscale, lấy ở trang quản trị của bạn.</p>
+    </div>
+
+    <ol class="steps">
+      <li class="step reveal">
+        <div class="step__no">01</div>
+        <h3>Chạy bằng quyền Administrator</h3>
+        <p>Bấm phải file .exe → <em>Run as administrator</em>. Công cụ cũng tự xin nâng quyền
+           nếu bạn mở thường — không có quyền quản trị thì không sửa được dịch vụ và tường lửa.</p>
+      </li>
+      <li class="step reveal">
+        <div class="step__no">02</div>
+        <h3>Dán auth key và khai tài khoản</h3>
+        <p>Dán key <code>tskey-auth-…</code>, nhập tên người dùng (bấm Random cho mật khẩu),
+           đổi cổng RDP nếu 3389 bị nhà mạng hoặc chính sách công ty chặn.</p>
+      </li>
+      <li class="step reveal">
+        <div class="step__no">03</div>
+        <h3>Bấm START SETUP rồi ngồi xem log</h3>
+        <p>Bảy bước chạy tuần tự, mỗi bước in kết quả ngay. Xong sẽ hiện địa chỉ Tailscale
+           dạng <code>100.x.x.x</code> — đó là địa chỉ bạn dùng để kết nối vào.</p>
+      </li>
+      <li class="step reveal">
+        <div class="step__no">04</div>
+        <h3>Kết nối thử TRƯỚC KHI rời máy</h3>
+        <p>Mở Remote Desktop từ máy khác trong cùng mạng Tailscale, đăng nhập bằng tài khoản
+           vừa tạo. Vào được rồi mới yên tâm rút màn hình hoặc rời khỏi máy.</p>
+      </li>
+    </ol>
+
+    <div class="callout callout--warn reveal" style="max-width:none">
+      <b>Đừng rút màn hình khi chưa kết nối thử được.</b> Nếu RDP chưa lên mà máy đã không còn
+      màn hình lẫn bàn phím, bạn mất sạch đường vào và phải quay lại tận nơi. Khoảng 20% máy có
+      hệ thống RDP ở trạng thái hỏng sâu, phải khởi động lại một lần mới xong — hãy khởi động lại
+      <em>khi còn đang ngồi trước máy</em>.
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ QUY TRÌNH ══════════════════════════ -->
+<section class="sec" id="quy-trinh">
+  <div class="wrap">
+    <div class="sec__head reveal">
+      <span class="eyebrow">Quy trình</span>
+      <h2>Bảy bước chạy sau khi bạn bấm START</h2>
+      <p>Không có gì chạy ngầm sau lưng — mỗi dòng dưới đây đều hiện trong nhật ký ngay lúc nó xảy ra.</p>
+    </div>
+
+    <div class="tablewrap reveal">
+      <table class="table">
+        <thead><tr><th>Bước</th><th>Việc</th><th>Chi tiết</th></tr></thead>
+        <tbody>
+          <tr><td>01</td><td>Tải Tailscale</td><td>Lấy bộ cài chính thức từ máy chủ Tailscale</td></tr>
+          <tr><td>02</td><td>Cài im lặng</td><td>Cài không cần bấm Next, không hiện cửa sổ</td></tr>
+          <tr><td>03</td><td>Kết nối mạng riêng</td><td><code>tailscale up</code> bằng auth key bạn dán</td></tr>
+          <tr><td>04</td><td>Bật Remote Desktop</td><td>Registry + tường lửa + chính sách đăng nhập từ xa</td></tr>
+          <tr><td>05</td><td>Tạo tài khoản</td><td>Thêm user, đặt mật khẩu, gán nhóm Remote Desktop Users</td></tr>
+          <tr><td>06</td><td>Khởi động lại dịch vụ</td><td>Đúng thứ tự phụ thuộc, có kiểm tra listener thật</td></tr>
+          <tr><td>07</td><td>Lấy địa chỉ &amp; kiểm tra</td><td>Hiện IP Tailscale, thử bắt tay TCP vào cổng RDP</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fineprint reveal">
+      Với máy Windows Home hoặc bản không cho phép nhiều phiên, công cụ cài thêm phần hỗ trợ RDP
+      (RDPWrap / vá tệp dịch vụ đầu cuối) và đăng ký tác vụ tự sửa lại sau khi Windows cập nhật.
+      Phần này có ràng buộc về giấy phép — đọc kỹ mục <a href="#ban-quyen">Bản quyền</a> bên dưới.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════ BẢO MẬT ══════════════════════════ -->
+<section class="sec sec--alt" id="bao-mat">
+  <div class="wrap">
+    <div class="sec__head reveal">
+      <span class="eyebrow">Bảo mật</span>
+      <h2>Mở RDP ra Internet là cách mất máy nhanh nhất</h2>
+      <p>Cổng 3389 công khai bị dò mật khẩu liên tục và là cửa vào quen thuộc của mã độc tống tiền.
+         Công cụ này cố tình không làm theo cách đó.</p>
+    </div>
+
+    <div class="tablewrap reveal">
+      <table class="table table--cmp">
+        <thead>
+          <tr><th>Tiêu chí</th><th class="hi">NOVIVO Remote Desktop</th><th>Mở port 3389 trên router</th><th>TeamViewer / AnyDesk</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Ai chạm được vào cổng RDP</td><td class="hi"><b class="ok-text">Chỉ thiết bị trong mạng riêng</b></td><td>Cả Internet</td><td>Qua máy chủ trung gian của hãng</td></tr>
+          <tr><td>Bị dò mật khẩu tự động</td><td class="hi"><b class="ok-text">Không thấy để mà dò</b></td><td>Liên tục, 24/7</td><td>Không</td></tr>
+          <tr><td>Cần IP tĩnh / port forward</td><td class="hi"><b class="ok-text">Không</b></td><td>Có</td><td>Không</td></tr>
+          <tr><td>Mã hoá đường truyền</td><td class="hi"><b class="ok-text">WireGuard đầu-cuối</b></td><td>Chỉ lớp TLS của RDP</td><td>Của hãng</td></tr>
+          <tr><td>Phí theo tháng</td><td class="hi"><b class="ok-text">Không</b></td><td>Không</td><td>Có, nếu dùng thương mại</td></tr>
+          <tr><td>Toàn quyền máy sau khi vào</td><td class="hi">Phiên Windows đầy đủ</td><td>Phiên Windows đầy đủ</td><td>Điều khiển màn hình</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note reveal">
+      <b>Vẫn nên làm thêm ba việc:</b> đặt mật khẩu dài cho tài khoản được phép RDP (đừng dùng mật khẩu
+      mặc định của công cụ mãi mãi); giới hạn thiết bị được vào bằng ACL trong trang quản trị Tailscale;
+      và gỡ tài khoản khỏi nhóm <em>Remote Desktop Users</em> khi người đó nghỉ việc.
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ BẢN QUYỀN ══════════════════════════ -->
+<section class="sec" id="ban-quyen">
+  <div class="wrap">
+    <div class="sec__head reveal">
+      <span class="eyebrow">Bản quyền</span>
+      <h2>Kỹ thuật mở được không có nghĩa là giấy phép cho phép</h2>
+      <p>Đây là chỗ nhiều người làm sai mà không biết. Nói rõ để bạn chọn đúng loại giấy phép ngay từ đầu,
+         đỡ phải gỡ ra làm lại khi công ty bị kiểm tra.</p>
+    </div>
+
+    <div class="lic">
+      <article class="lic__card reveal">
+        <span class="lic__type">Windows Pro</span>
+        <h3>Một phiên từ xa</h3>
+        <p>Windows 10/11 Pro, Enterprise có sẵn Remote Desktop nhưng chỉ cho <b>một phiên tại một thời điểm</b>:
+           người ở xa vào thì người ngồi tại máy bị đăng xuất. Dùng đúng như vậy là hợp lệ, không cần mua thêm gì.</p>
+        <ul>
+          <li>Đúng cho máy cá nhân, máy trạm một người dùng</li>
+          <li>Không cần giấy phép bổ sung</li>
+        </ul>
+      </article>
+
+      <article class="lic__card reveal">
+        <span class="lic__type">Windows Home</span>
+        <h3>Vốn không có RDP</h3>
+        <p>Bản Home bị Microsoft khoá phần máy chủ Remote Desktop. Công cụ có thể bật lên bằng
+           thành phần bổ sung, nhưng đó là <b>can thiệp kỹ thuật, không phải quyền được cấp thêm</b>.
+           Dùng cho máy nhà, máy thử nghiệm thì được; đưa vào vận hành doanh nghiệp thì nên nâng lên Pro.</p>
+        <ul>
+          <li>Windows Defender có thể báo thành phần này là PUA</li>
+          <li>Nâng cấp Home → Pro mua thẳng trong Settings</li>
+        </ul>
+      </article>
+
+      <article class="lic__card reveal">
+        <span class="lic__type">Windows Server + RDS CAL</span>
+        <h3>Nhiều người vào cùng lúc</h3>
+        <p>Muốn nhiều phiên đồng thời một cách hợp lệ thì phải là <b>Windows Server</b> có bật vai trò
+           Remote Desktop Services và mua <b>RDS CAL</b> cho từng người hoặc từng thiết bị. Đây là cách duy nhất
+           đúng giấy phép cho văn phòng nhiều người dùng chung một máy.</p>
+        <ul>
+          <li>Mua qua đối tác Microsoft được ủy quyền</li>
+          <li>Có hóa đơn, chứng từ khi thanh tra</li>
+        </ul>
+      </article>
+    </div>
+
+    <div class="callout callout--warn reveal" style="max-width:none">
+      <b>Nói thẳng:</b> phần mở nhiều phiên trên Windows client (RDPWrap, vá tệp dịch vụ đầu cuối)
+      <b>trái với điều kiện giấy phép của Microsoft</b>, dù về kỹ thuật nó chạy được. NOVIVO cung cấp
+      chức năng đó cho môi trường thử nghiệm và máy cá nhân của chính bạn; trách nhiệm tuân thủ giấy phép
+      thuộc về người sử dụng. Với môi trường doanh nghiệp, hãy dùng Windows Server + RDS CAL.
+      Pháp luật Việt Nam bảo hộ chương trình máy tính như một tác phẩm và <b>không</b> miễn trừ cho việc
+      dùng phần mềm sai giấy phép chỉ vì mục đích nội bộ.
+    </div>
+
+    <div class="legal-links reveal">
+      <a href="/dieu-khoan">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>
+        Điều khoản sử dụng
+      </a>
+      <a href="/mien-tru-trach-nhiem">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6l7-3z"/><path d="M12 9v4M12 16h.01"/></svg>
+        Tuyên bố miễn trừ trách nhiệm
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ TẢI VỀ / THÔNG SỐ ══════════════════════════ -->
+<section class="sec sec--alt" id="thong-so">
+  <div class="wrap">
+    <div class="specs">
+      <div class="specs__copy reveal">
+        <span class="eyebrow">Tải về</span>
+        <h2>Hai kiểu đóng gói, chọn cái hợp với bạn</h2>
+        <p><b>Bản Full (.zip)</b> là lựa chọn khuyên dùng: giải nén ra thư mục rồi chạy
+           <em>NOVIVO Remote Desktop.exe</em> bên trong. Khởi động nhanh hơn và <b>ít bị phần mềm
+           diệt virus báo nhầm</b> vì không tự bung ra thư mục tạm.
+           <b>Bản EXE gọn</b> một file, tiện gửi qua Zalo hay USB, nhưng hay bị Windows Defender
+           cảnh báo hơn — xem mục hỏi đáp bên dưới.</p>
+
+        <div class="hero__cta" style="margin-top:24px">
+          <a class="btn btn--primary" href="/download-full" data-dl>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v9m0 0L4.5 6.5M8 10l3.5-3.5M2 13h12"/></svg>
+            Bản Full .zip <span class="btn__meta" data-size-zip>20.7 MB</span>
+          </a>
+          <a class="btn btn--ghost" href="/download" data-dl>
+            Bản EXE gọn <span class="btn__meta" data-size-exe>20.7 MB</span>
+          </a>
+        </div>
+
+        <div class="hashbox">
+          <div class="hashbox__cap">SHA-256 — bản EXE</div>
+          <code data-sha-exe>đang tải…</code>
+          <div class="hashbox__cap" style="margin-top:16px">SHA-256 — bản Full .zip</div>
+          <code data-sha-zip>đang tải…</code>
+          <div class="hashbox__hint">Đối chiếu bằng PowerShell:
+            <code class="inline">Get-FileHash .\tên-file -Algorithm SHA256</code>
+          </div>
+        </div>
+      </div>
+
+      <dl class="specs__list reveal">
+        <div><dt>Hệ điều hành</dt><dd>Windows 10 / 11 / Server 2016+</dd></div>
+        <div><dt>Kiến trúc</dt><dd>64-bit</dd></div>
+        <div><dt>Quyền</dt><dd>Bắt buộc Administrator</dd></div>
+        <div><dt>Phiên bản</dt><dd data-version>v1.0.15</dd></div>
+        <div><dt>Bản EXE</dt><dd data-size-exe>20.7 MB</dd></div>
+        <div><dt>Bản Full .zip</dt><dd data-size-zip>20.7 MB</dd></div>
+        <div><dt>Mạng riêng</dt><dd>Tailscale (WireGuard)</dd></div>
+        <div><dt>Cổng mặc định</dt><dd>3389, đổi được</dd></div>
+        <div><dt>Nền tảng</dt><dd>Python 3 · CustomTkinter · PowerShell</dd></div>
+        <div><dt>Chi phí</dt><dd>Miễn phí</dd></div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ HỎI ĐÁP ══════════════════════════ -->
+<section class="sec" id="hoi-dap">
+  <div class="wrap wrap--narrow">
+    <div class="sec__head reveal">
+      <span class="eyebrow">Hỏi đáp</span>
+      <h2>Những thứ hay gặp</h2>
+    </div>
+
+    <div class="faq">
+      <details class="reveal">
+        <summary>Windows Defender báo virus (Bearfoos / Sabsik) khi tải bản EXE?</summary>
+        <p>Đây là <b>báo nhầm (false positive)</b>, không phải máy bạn nhiễm gì. Công cụ được đóng gói bằng
+           PyInstaller và thực hiện đúng những việc mà phần mềm quản trị phải làm — sửa registry, khởi động lại
+           dịch vụ, cài phần mềm — nên bộ máy học của Defender xếp nhầm vào nhóm nguy hiểm. Rufus, RDPWrap và
+           nhiều công cụ hệ thống khác cũng bị y hệt.</p>
+        <p><b>Cách xử lý, theo thứ tự khuyên dùng:</b></p>
+        <p>1. Tải <b>bản Full (.zip)</b> thay cho bản EXE — nó không tự bung ra thư mục tạm nên ít bị báo nhầm hơn
+           nhiều. Đây là lý do trang này để .zip làm bản chính.<br>
+           2. Nếu vẫn muốn dùng bản EXE: mở Windows Security → Virus &amp; threat protection → Protection history,
+           chọn mục vừa bị chặn → <em>Allow</em>; hoặc thêm thư mục chứa file vào <em>Exclusions</em>.<br>
+           3. Trước khi chạy, đối chiếu <b>SHA-256</b> của file với mã công bố ở mục Tải về phía trên — trùng nghĩa là
+           file nguyên vẹn, đúng bản phát hành từ máy chủ này.</p>
+        <p>Chỉ nên tải công cụ này từ <b>remote.novivo.net</b>. File lấy ở nơi khác thì không bảo đảm gì.</p>
+      </details>
+
+      <details class="reveal">
+        <summary>Windows Defender báo PUA:Win32/RDPWrap, có sao không?</summary>
+        <p>Đó là thành phần mở Remote Desktop cho các bản Windows bị khoá tính năng này.
+           Microsoft xếp nó vào nhóm “ứng dụng không mong muốn” (PUA) vì nó sửa hành vi của dịch vụ
+           đầu cuối — cảnh báo đúng về mặt phân loại, không phải mã độc. Nếu máy bạn là Windows Pro và
+           chỉ cần một phiên, bạn không cần thành phần này. Nếu vẫn muốn dùng, hãy đọc kỹ mục
+           <a href="#ban-quyen">Bản quyền</a> trước.</p>
+      </details>
+
+      <details class="reveal">
+        <summary>Vì sao bắt buộc quyền Administrator?</summary>
+        <p>Vì công cụ phải sửa registry hệ thống, khởi động lại dịch vụ Windows, thêm luật tường lửa,
+           tạo tài khoản người dùng và cài phần mềm. Không có việc nào trong đó chạy được bằng quyền
+           người dùng thường. Đây cũng là lý do bạn chỉ nên chạy công cụ tải từ chính trang này.</p>
+      </details>
+
+      <details class="reveal">
+        <summary>Lấy auth key của Tailscale ở đâu?</summary>
+        <p>Đăng nhập trang quản trị Tailscale của bạn, vào mục Settings → Keys, tạo một
+           <em>auth key</em> (dạng <code>tskey-auth-…</code>). Nên bật tùy chọn dùng nhiều lần nếu bạn
+           định cài cho nhiều máy, và đặt thời hạn hết hiệu lực cho an toàn.</p>
+      </details>
+
+      <details class="reveal">
+        <summary>Máy đang ở xa, tôi cài qua RDP hiện có được không?</summary>
+        <p>Được, nhưng phải hết sức cẩn thận: bước khởi động lại dịch vụ sẽ ngắt chính phiên bạn đang dùng.
+           Nếu không lên lại được thì bạn mất đường vào. Với máy ở xa không ai trực, hãy đặt lệnh hẹn giờ
+           khởi động lại có thời gian hủy (<code>shutdown /r /t 300</code>, hủy bằng <code>shutdown /a</code>)
+           như một cái phao.</p>
+      </details>
+
+      <details class="reveal">
+        <summary>Cổng 3389 bị chặn thì sao?</summary>
+        <p>Đổi sang cổng khác ngay trong ô RDP PORT trước khi bấm START — công cụ sẽ cấu hình registry,
+           tường lửa và luật kiểm tra theo đúng cổng mới. Khi kết nối thì nhập dạng
+           <code>100.x.x.x:cổng</code>.</p>
+      </details>
+
+      <details class="reveal">
+        <summary>Sau này muốn gỡ thì làm sao?</summary>
+        <p>Gỡ Tailscale trong Apps &amp; features, tắt Remote Desktop trong Settings → System → Remote Desktop,
+           xoá tài khoản đã tạo trong Computer Management, và xoá tác vụ tự sửa trong Task Scheduler.
+           Công cụ không cài dịch vụ nền nào của riêng NOVIVO.</p>
+      </details>
+
+      <details class="reveal">
+        <summary>Có bản dùng ZeroTier không?</summary>
+        <p>Có — phần xử lý ZeroTier vẫn nằm trong bộ mã nguồn và các script đi kèm bản Full,
+           dùng cho máy đã quen mạng ZeroTier từ trước. Bản giao diện hiện tại mặc định đi theo Tailscale
+           vì cài nhanh hơn và ít bước duyệt thiết bị hơn.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ CTA ══════════════════════════ -->
+<section class="cta">
+  <div class="wrap cta__inner reveal">
+    <img src="/assets/logo.png" alt="" width="64" height="64" class="cta__logo">
+    <h2>Cài một lần, vào được mãi</h2>
+    <p>Miễn là còn mạng, máy đó luôn nằm trong tầm tay bạn.</p>
+    <a class="btn btn--primary btn--lg" href="/download-full" data-dl>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v9m0 0L4.5 6.5M8 10l3.5-3.5M2 13h12"/></svg>
+      Tải NOVIVO Remote Desktop
+      <span class="btn__meta" data-size-zip>20.7 MB</span>
+    </a>
+    <div class="cta__meta">
+      Bản <span data-version>v1.0.15</span> · Windows 10/11/Server 64-bit · Cần quyền Administrator ·
+      Cập nhật <span data-updated>—</span>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ══════════════════════════ FOOTER ══════════════════════════ -->
+<footer class="foot">
+  <div class="wrap foot__inner">
+    <div class="foot__brand">
+      <img src="/assets/logo.png" alt="" width="30" height="30">
+      <div>
+        <div class="foot__name"><strong>NOVIVO</strong> Remote Desktop</div>
+        <div class="foot__sub">Một sản phẩm của hệ thống NOVIVO</div>
+      </div>
+    </div>
+
+    <nav class="foot__links" aria-label="Liên kết chân trang">
+      <a href="#tinh-nang">Tính năng</a>
+      <a href="#cach-dung">Cách dùng</a>
+      <a href="#bao-mat">Bảo mật</a>
+      <a href="#ban-quyen">Bản quyền</a>
+      <a href="/dieu-khoan">Điều khoản sử dụng</a>
+      <a href="/mien-tru-trach-nhiem">Miễn trừ trách nhiệm</a>
+      <a href="https://novivo.net" rel="noopener">novivo.net</a>
+    </nav>
+  </div>
+
+  <div class="wrap foot__legal">
+    <p>Windows, Microsoft, Remote Desktop và các nhãn hiệu liên quan thuộc về Microsoft Corporation;
+       Tailscale và ZeroTier thuộc về các chủ sở hữu tương ứng. NOVIVO Remote Desktop là công cụ độc lập,
+       không liên kết hay được các bên trên bảo trợ. Công cụ chỉ cấu hình các thành phần có sẵn của Windows
+       và cài phần mềm mạng riêng từ nguồn chính thức — người sử dụng chịu trách nhiệm bảo đảm việc sử dụng
+       phù hợp với giấy phép phần mềm và quy định pháp luật.</p>
+    <p class="foot__copy">© <span data-year>2026</span> NOVIVO · remote.novivo.net</p>
+  </div>
+</footer>
+
+<script src="/main.js?v=20260904c" defer></script>
+</body>
+</html>
