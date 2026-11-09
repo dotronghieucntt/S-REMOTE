@@ -24,6 +24,18 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
+// ── Nhật ký thao tác 04/11/2026 (C:\NOVIVO-AUDIT\SPEC.md) ────────────────────
+// Ghi mọi POST/PUT/PATCH/DELETE + MỌI lần thử mã mở khoá (/api/ts-key) vào C:\NOVIVO-AUDIT\logs\remote.
+// captureBody:false là BẮT BUỘC: mã mở khoá nằm ở trường "code" — tên này không khớp mẫu che bí mật của
+// thư viện nên ghi thân yêu cầu là lộ mã. Lỗi ghi nhật ký không bao giờ làm hỏng yêu cầu.
+const audit = require('./novivoAudit.cjs').createAudit({ app: 'remote', stream: 'web' });
+const auditHttp = audit.express({ captureBody: false });
+const TS_KEY_TARGET = { kind: 'tailscale-key', id: 'shared', label: 'Auth key Tailscale dùng chung' };
+const TS_KEY_ACTOR = { id: 'ts-unlock-code', name: 'Mã mở khoá dùng chung', role: 'remote-app', via: 'api-key' };
+function auditUnlock(action, fields) {
+  try { audit.auth(action, Object.assign({ target: TS_KEY_TARGET }, fields)); } catch { /* không chặn yêu cầu */ }
+}
+
 // ── Cấu hình ────────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 5301;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -268,19 +280,15 @@ setInterval(saveStats, 30000).unref();
 // lại mỗi lần gọi nên đổi key/mã không cần restart.
 //   TS_UNLOCK_CODE=...        mã mở khoá
 //   TS_SHARED_AUTHKEY=tskey-… key Tailscale (nên là key Reusable)
-// Chống dò mã: sai 5 lần thì khoá IP đó 15 phút; cả máy chủ sai 30 lần trong 1 giờ
-// thì khoá mọi IP 1 giờ (dò từ nhiều IP cũng không lọt). IPv6 tính theo dải /64
-// (một máy tự đổi được cả dải). Mã SAI ĐỘ DÀI vẫn trả "Sai mã." nhưng không tính
-// lượt: app tự gửi mã mỗi khi người gõ dừng tay, gõ dở chừng không được làm khoá.
+// Chống dò mã: sai 5 lần (kể cả sai độ dài) thì khoá IP đó 15 phút. IPv6 tính theo
+// dải /64 (một máy tự đổi được cả dải). Không còn khoá toàn máy chủ (xem ghi chú 04/11).
 const ENV_FILE = path.join(ROOT, '.env');
+// 04/11 bảo mật: bỏ khoá TOÀN BỘ (1 kẻ dò sai 30 lần là khoá mọi khách 1 giờ) — chỉ khoá theo IP;
+// mã sai độ dài CŨNG tính lượt (trước đây không tính -> dò ra được độ dài mã qua việc có bị khoá hay không).
 const UNLOCK_IP_MAX_FAILS     = 5;
 const UNLOCK_IP_LOCK_MS       = 15 * 60000;
-const UNLOCK_GLOBAL_MAX_FAILS = 30;
-const UNLOCK_GLOBAL_WINDOW_MS = 60 * 60000;
 
 const unlockFails = new Map();   // ip -> { count, lockedUntil, last }
-let globalFails = [];            // mốc thời gian các lần sai
-let globalLockedUntil = 0;
 
 setInterval(() => {
   const now = Date.now();
@@ -352,10 +360,11 @@ async function serveTsKey(req, res) {
   const ip = clientIp(req);
   const key = rateKey(ip);
   const rec = unlockFails.get(key);
-  const lockedUntil = Math.max(rec ? rec.lockedUntil : 0, globalLockedUntil);
+  const lockedUntil = rec ? rec.lockedUntil : 0;
   if (lockedUntil > now) {
     const minutes = Math.ceil((lockedUntil - now) / 60000);
     res.setHeader('Retry-After', String(minutes * 60));
+    auditUnlock('login.fail', { actor: null, outcome: 'denied', note: 'IP đang bị khoá vì sai mã nhiều lần — không xét mã', meta: { reason: 'ip_locked', retryAfterMinutes: minutes } });
     return sendJSON(res, 429, {
       ok: false,
       message: 'Nhập sai quá nhiều lần, thử lại sau ' + minutes + ' phút.',
@@ -367,11 +376,13 @@ async function serveTsKey(req, res) {
   try {
     code = String(JSON.parse(await readBody(req, 1024)).code || '').trim();
   } catch {
+    auditUnlock('login.fail', { actor: null, outcome: 'error', note: 'yêu cầu mở khoá không hợp lệ (thân không phải JSON / quá lớn)', meta: { reason: 'bad_request' } });
     return sendJSON(res, 400, { ok: false, message: 'Yêu cầu không hợp lệ.' });
   }
 
   const env = loadEnvFile(ENV_FILE);
   if (!env.TS_UNLOCK_CODE || !env.TS_SHARED_AUTHKEY) {
+    auditUnlock('login.fail', { actor: null, outcome: 'error', note: 'máy chủ chưa cấu hình mã/key dùng chung', meta: { reason: 'not_configured' } });
     return sendJSON(res, 503, { ok: false, message: 'Máy chủ chưa cấu hình key dùng chung.' });
   }
 
@@ -379,12 +390,9 @@ async function serveTsKey(req, res) {
   if (code && crypto.timingSafeEqual(digest(code), digest(env.TS_UNLOCK_CODE))) {
     unlockFails.delete(key);
     console.log('[remote] mở khoá key Tailscale: ĐÚNG mã, IP ' + ip);
+    audit.setActor(TS_KEY_ACTOR);
+    auditUnlock('login.success', { actor: TS_KEY_ACTOR, outcome: 'ok', note: 'đúng mã mở khoá → đã trả key Tailscale dùng chung', meta: { keyIssued: true } });
     return sendJSON(res, 200, { ok: true, key: env.TS_SHARED_AUTHKEY });
-  }
-
-  if (code.length !== env.TS_UNLOCK_CODE.length) {
-    // gõ dở / gõ thừa: không tính lượt (xem ghi chú đầu khối)
-    return sendJSON(res, 403, { ok: false, message: 'Sai mã.' });
   }
 
   const r = rec || { count: 0, lockedUntil: 0, last: 0 };
@@ -396,12 +404,10 @@ async function serveTsKey(req, res) {
   }
   unlockFails.set(key, r);
 
-  globalFails = globalFails.filter((t) => now - t < UNLOCK_GLOBAL_WINDOW_MS);
-  globalFails.push(now);
-  if (globalFails.length >= UNLOCK_GLOBAL_MAX_FAILS) {
-    globalLockedUntil = now + UNLOCK_GLOBAL_WINDOW_MS;
-    globalFails = [];
-    console.error('[remote] mở khoá key Tailscale: sai ' + UNLOCK_GLOBAL_MAX_FAILS + ' lần/giờ — KHOÁ TOÀN BỘ 1 giờ');
+  const lockedNow = r.lockedUntil > now;
+  auditUnlock('login.fail', { actor: null, outcome: 'denied', note: code ? 'sai mã mở khoá' : 'mã mở khoá rỗng', meta: { reason: code ? 'wrong_code' : 'empty_code', ipLocked: lockedNow } });
+  if (lockedNow) {
+    try { audit.security('unlock.ip_locked', { actor: null, target: TS_KEY_TARGET, outcome: 'denied', note: 'sai mã ' + UNLOCK_IP_MAX_FAILS + ' lần → khoá IP/dải 15 phút', meta: { ipRange: key } }); } catch { /* bỏ qua */ }
   }
   console.warn('[remote] mở khoá key Tailscale: SAI mã, IP ' + ip + (r.lockedUntil > now ? ' — khoá IP 15 phút' : ''));
   return sendJSON(res, 403, { ok: false, message: 'Sai mã.' });
@@ -549,7 +555,15 @@ async function serveDownload(req, res, kind) {
 }
 
 // ── Server ──────────────────────────────────────────────────────────────────
-const server = http.createServer(async (req, res) => {
+// Nhật ký thao tác 04/11/2026: auditHttp mở ngữ cảnh (biết IP/UA cho audit.auth) rồi mới chạy handleRequest;
+// middleware hỏng thì vẫn phục vụ bình thường (ran = handleRequest đã chạy chưa, tránh chạy 2 lần).
+const server = http.createServer((req, res) => {
+  let ran = false;
+  const go = () => { ran = true; return handleRequest(req, res); };
+  try { auditHttp(req, res, go); } catch { if (!ran) go(); }
+});
+
+async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://' + (req.headers.host || 'remote.novivo.net'));
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
@@ -598,7 +612,7 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('500 — lỗi máy chủ');
   }
-});
+}
 
 process.on('SIGINT', () => saveStats().finally(() => process.exit(0)));
 process.on('SIGTERM', () => saveStats().finally(() => process.exit(0)));
